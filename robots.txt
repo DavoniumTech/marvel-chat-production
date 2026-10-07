@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://marvelchat.davoniumtech.com/sitemap.xml

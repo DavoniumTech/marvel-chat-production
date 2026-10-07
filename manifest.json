@@ -1,0 +1,23 @@
+{
+  "name": "Marvel Chat \u2014 Davonium Technologies",
+  "short_name": "Marvel Chat",
+  "description": "Connect, chat, discover skills, explore the market, and grow with your community.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#100b2f",
+  "theme_color": "#5b21d6",
+  "icons": [
+    {
+      "src": "./assets/brand/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./assets/brand/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
