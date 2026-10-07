@@ -1,76 +1,48 @@
-# Marvel Chat — Production Frontend Candidate
+# Marvel Chat — Modern Frontend Production Candidate
 
 Davonium Technologies
 
-This package is the current Marvel Chat frontend candidate. It preserves the vanilla JavaScript application and current Firebase/Cloud Functions/R2 architecture while upgrading the presentation for a polished social-platform experience.
+This package is a modernized frontend candidate built against the current Marvel Chat frontend direction and the live backend project.
 
-## Product structure
+It preserves the vanilla JavaScript stack and the existing backend boundaries while upgrading the product presentation toward a polished, responsive social/platform experience inspired by the supplied Marvel Chat reference boards.
 
-Primary destinations:
+## Live Firebase alignment
 
-- Home
-- Chat
-- Marvel Skills
-- Marvel Market
-- Profile
+- Firebase project: `project-ec531e09-e3fd-4408-a35`
+- Web App ID: `1:960686800050:web:f3c7abb87660d9d2e0ddab`
+- Functions region: `europe-west1`
+- Cloud Functions v2 callable API adapter
+- Firestore reads/listeners where permitted
+- Cloudflare R2 signed media upload/read flow
 
-Secondary utilities include Search, Notifications, Settings, legal pages, and seller/provider onboarding.
+## Primary product areas
 
-## Home experience
+Home, Chat, Marvel Skills, Marvel Market, Profile.
 
-Home intentionally follows a familiar social-feed hierarchy:
+Search, Notifications, Settings, legal pages, and onboarding remain secondary utilities.
 
-1. Marvel Chat brand/header.
-2. Polygon Moments/Stories row with an Add button.
-3. Compact post composer.
-4. Community feed.
-5. Floating plus action for post creation.
+## UI direction
 
-The brand icon and ordinary user avatars are square. Polygon styling is reserved for Moments/Stories.
+The interface uses:
 
-## Media
+- strong desktop application chrome
+- mobile bottom navigation
+- polished card hierarchy
+- modern light and dark themes
+- premium violet/blue product accent language
+- responsive social feed composition
+- secure photo-post workflow with upload preview
+- readable chat presentation
+- accessible buttons, labels, and focus-friendly interactions
 
-The verified backend permits up to 10 media IDs on one Home post and limits each media item to 2 MiB. This frontend accepts photos and supported video formats, compresses images before upload, and attempts native browser video re-encoding before the signed R2 upload.
+The supplied reference images were used as visual direction, not copied as application assets.
 
-The backend currently does not define a trustworthy 2 MiB-per-day quota. The frontend therefore does not invent a client-only daily quota.
+## Security note
 
-## Backend alignment
+Do not disable Firebase App Check to make testing convenient. The production reCAPTCHA Enterprise/App Check web site key is configured in `js/config.js`.
 
-The frontend uses the current backend names and contracts, including:
+Never put Firebase Admin credentials, service-account files, Cloudflare R2 private credentials, or other private secrets in this frontend.
 
-- `createPost`
-- `createMoment`
-- `createMediaUpload`
-- `finalizeMediaUpload`
-- `createMediaReadUrls`
-- `createChatThread`
-- `sendMessage`
-- `markThreadRead`
-- `registerDevice`
-- `unregisterDevice`
-- `ensureUserProfile`
-- `updateProfile`
-- `updateUserSettings`
-- Skills and Market functions already exposed by the current API adapter.
+## Windows
 
-Chat uses the current `participantIds` contract for direct threads.
-
-## Browser configuration
-
-`js/config.js` contains the public App Check site key and public FCM Web Push VAPID key supplied for the current Firebase project.
-
-No server secret belongs in this package.
-
-## Domain
-
-Production hostname:
-
-`https://marvelchat.davoniumtech.com/`
-
-A `CNAME` file is included for GitHub Pages.
-
-## Important production boundary
-
-This is a **production candidate**, not a claim of certification. Real-browser certification still covers the custom domain, HTTPS, Firebase Authentication authorized domain, App Check behavior, R2 CORS, browser push, and live end-to-end feature testing.
-
-See `docs/PRODUCTION-SETUP-20261007.md` for the exact release runbook.
+See `OPEN-IN-VSCODE.cmd` and `docs/LAUNCH-CHECKLIST.md`.

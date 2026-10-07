@@ -23,7 +23,6 @@ import {
   onSnapshot
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 import {getFunctions, httpsCallable} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js";
-import {getInstallations, getId} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-installations.js";
 import {
   initializeAppCheck,
   ReCaptchaEnterpriseProvider,
@@ -38,10 +37,6 @@ import {
 import {firebaseConfig, appCheckSiteKey, vapidKey} from "./config.js";
 
 export const firebaseApp = initializeApp(firebaseConfig);
-export const auth = getAuth(firebaseApp);
-export const db = getFirestore(firebaseApp);
-export const functions = getFunctions(firebaseApp, "europe-west1");
-export const installations = getInstallations(firebaseApp);
 
 let appCheck = null;
 let messaging = null;
@@ -55,6 +50,14 @@ export function initAppCheck() {
   });
   return true;
 }
+
+// Initialize production App Check before constructing the Firebase services
+// that will be used by the application.
+initAppCheck();
+
+export const auth = getAuth(firebaseApp);
+export const db = getFirestore(firebaseApp);
+export const functions = getFunctions(firebaseApp, "europe-west1");
 
 export async function appCheckReady() {
   if (!initAppCheck()) return false;
@@ -72,23 +75,10 @@ export async function getBrowserMessaging() {
   return messaging;
 }
 
-export async function getBrowserFcmIdentity() {
+export async function getBrowserFcmToken() {
   const msg = await getBrowserMessaging();
   if (!msg) return null;
-  const [installationId, token] = await Promise.all([
-    getId(installations),
-    getMessagingToken(msg, {
-      vapidKey,
-      serviceWorkerRegistration: await navigator.serviceWorker.ready,
-    }),
-  ]);
-  if (!token || !installationId) return null;
-  return {installationId, token};
-}
-
-export async function getBrowserFcmToken() {
-  const identity = await getBrowserFcmIdentity();
-  return identity?.token || null;
+  return getMessagingToken(msg, {vapidKey, serviceWorkerRegistration: await navigator.serviceWorker.ready});
 }
 
 export function onForegroundMessage(callback) {

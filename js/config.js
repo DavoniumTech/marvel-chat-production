@@ -8,18 +8,16 @@ export const firebaseConfig = {
   "measurementId": "G-SFD6SXHML0"
 };
 
-// REQUIRED: Firebase App Check reCAPTCHA Enterprise site key.
-// Do not put a private key here. This is a public browser value.
+// Public production reCAPTCHA Enterprise/App Check web key.
 export const appCheckSiteKey = "6LcYItwtAAAAAFWkMn7GYro06LuG3VMR1K0U1Xgb";
 
-// OPTIONAL UNTIL BROWSER PUSH IS CERTIFIED.
-// Public Firebase Web Push certificate key.
-export const vapidKey = "BLjOBXC2DAJoHgkxMY-Mc1DITVEPJN4rpjnKXXqxNshR42dw0OmkjT9dzzFQlPL839jUE6JGaBotyQv_g27bMNE";
+// Optional until Browser Push is fully certified in production.
+export const vapidKey = "";
 
 export const appMeta = {
   name: "Marvel Chat",
   company: "Davonium Technologies",
   projectId: "project-ec531e09-e3fd-4408-a35",
   region: "europe-west1",
-  domain: "marvelchat.davoniumtech.com",
+  domain: "marvelchat.davoniumtech.com"
 };

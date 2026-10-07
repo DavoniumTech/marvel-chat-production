@@ -12,7 +12,7 @@
 - Firebase Authentication: email/password and Google provider.
 - Cloud Functions: callable adapter for the known backend export inventory.
 - Firestore reads: bounded queries for Home, Chat, Skills, Market, and Notifications.
-- App Check: initialized during browser startup when the configured public site key is present.
+- App Check: initialized during browser startup with the existing production reCAPTCHA Enterprise public web site key using ReCaptchaEnterpriseProvider.
 - Chat: participant-scoped thread query with `participantUids` and compatibility fallback to `participantIds`.
 - Moments: own active Moment first, followed active Moments next, without unrelated Moment cards.
 - Market: discovery through the `discoverMarketProducts` callable; categories are a frontend browsing layer until exact category query contracts are enabled.
@@ -21,7 +21,7 @@
 ## Remaining production certification
 
 - Authorize the production domain and local development domain in Firebase Authentication.
-- Configure and verify App Check for production.
+- Verify production App Check at the live domain; the existing production reCAPTCHA Enterprise site key is already configured in js/config.js.
 - Verify exact seller/shop write payloads against the deployed backend.
 - Verify exact provider/Skills write payloads against the deployed backend.
 - Verify the secure R2 browser upload contract before enabling photo publishing.

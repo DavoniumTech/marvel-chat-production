@@ -10,7 +10,7 @@ This package is a frontend production candidate aligned to the live Firebase pro
 
 ## Important before public launch
 
-1. Set `appCheckSiteKey` in `js/config.js` to the public reCAPTCHA v3 site key registered for the production web app.
+1. Confirm `appCheckSiteKey` in `js/config.js` remains the registered production web key for `marvelchat.davoniumtech.com`.
 2. Keep `vapidKey` blank until browser push is certified, or set the correct public Web Push key.
 3. Confirm the production custom domain is an authorized Firebase Authentication domain.
 4. Confirm the R2 CORS policy allows the production frontend origin.

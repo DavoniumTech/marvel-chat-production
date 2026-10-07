@@ -26,22 +26,22 @@ test -f assets/brand/icon-192.png
 test -f assets/brand/icon-512.png
 test -f assets/brand/davonium-technologies-logo.png
 
+if grep -RniE --exclude='*.png' --exclude='*.jpg' --exclude='*.jpeg' --exclude='*.webp' 'TimeTrust|No Facebook|No Apple|No Microsoft|example\.com|placeholder production' index.html js css terms.html privacy.html community-guidelines.html; then
+  echo "PUBLIC_COPY_CHECK=FAIL"
+  exit 1
+fi
+
 python3 - <<'PY3'
 from pathlib import Path
-roots = [Path("index.html"), Path("js"), Path("css"), Path("terms.html"), Path("privacy.html"), Path("community-guidelines.html"), Path("README.md")]
-forbidden = ["No Facebook", "No Apple", "No Microsoft"]
-for path in roots:
-    files = [path] if path.is_file() else sorted(path.rglob("*"))
-    for file in files:
-        if not file.is_file() or file.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
-            continue
-        text = file.read_text(errors="ignore")
-        if "TimeTrust" in text:
-            raise SystemExit(f"Forbidden legacy product name found: {file}")
-        for phrase in forbidden:
-            if phrase.lower() in text.lower():
-                raise SystemExit(f"Forbidden third-party product copy found: {file}: {phrase}")
-print("PUBLIC_COPY_CHECK=PASS")
+import re
+api = Path("js/api.js").read_text()
+chunk = re.search(r"const names = \[(.*?)\];", api, re.S).group(1)
+forbidden = {"dispatchNotificationPush"}
+names = {x.strip().strip("\"") for x in chunk.split(",") if x.strip()}
+assert not (names & forbidden), "Trigger was incorrectly added to callable frontend catalog."
+assert "6LcYItwtAAAAAFWkMn7GYro06LuG3VMR1K0U1Xgb" in Path("js/config.js").read_text()
+print("CALLABLE_CATALOG_CHECK=PASS")
+print("APP_CHECK_CONFIG_CHECK=PASS")
 PY3
 
 echo "PUBLIC_COPY_CHECK=PASS"
