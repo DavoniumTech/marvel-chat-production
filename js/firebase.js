@@ -8,7 +8,9 @@ import {
   sendPasswordResetEmail,
   GoogleAuthProvider,
   signInWithPopup,
-  updateProfile as updateAuthProfile
+  updateProfile as updateAuthProfile,
+  setPersistence,
+  browserLocalPersistence
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-auth.js";
 import {
   getFirestore,
@@ -56,6 +58,7 @@ export function initAppCheck() {
 initAppCheck();
 
 export const auth = getAuth(firebaseApp);
+void setPersistence(auth, browserLocalPersistence).catch(() => {});
 export const db = getFirestore(firebaseApp);
 export const functions = getFunctions(firebaseApp, "europe-west1");
 

@@ -42,7 +42,7 @@ Marketplace discovery uses discoverMarketProducts.
 
 Store, product, inventory, availability, store status, commerce request, and review operations are server authoritative.
 
-The public Market experience is buyer-first. Seller management belongs under Profile → My Business.
+The public Market experience is buyer-first. Seller management belongs under Profile → My Shop.
 
 ## Identity
 

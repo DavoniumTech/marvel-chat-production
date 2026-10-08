@@ -1,47 +1,81 @@
-import { api } from "./api.js";
+import {api} from "./api.js";
 
-const MAX_IMAGE_BYTES = 2 * 1024 * 1024;
-const ALLOWED_IMAGE_TYPES = new Set([
+export const MAX_MEDIA_BYTES = 2 * 1024 * 1024;
+export const DAILY_MEDIA_BYTES = 2 * 1024 * 1024;
+export const MAX_HOME_MEDIA_ITEMS = 10;
+export const ALLOWED_HOME_MEDIA_TYPES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/gif",
+  "video/mp4",
+  "video/webm",
+  "video/quicktime"
+]);
+export const ALLOWED_MOMENT_MEDIA_TYPES = new Set([
   "image/jpeg",
   "image/png",
   "image/webp",
   "image/gif"
 ]);
 
-function ensureImage(file) {
-  if (!(file instanceof File)) {
-    throw new Error("Choose an image file.");
+function ensureFile(file, allowedTypes, label) {
+  if (!(file instanceof File)) throw new Error(`Choose a ${label} file.`);
+  if (!allowedTypes.has(file.type)) {
+    throw new Error(label === "media"
+      ? "Use JPG, PNG, WebP, GIF, MP4, WebM, or MOV files."
+      : "Use JPG, PNG, WebP, or GIF images.");
   }
-  if (!ALLOWED_IMAGE_TYPES.has(file.type)) {
-    throw new Error("Use JPG, PNG, WebP, or GIF images.");
-  }
-  if (file.size < 1 || file.size > MAX_IMAGE_BYTES) {
-    throw new Error("Images must be 2 MB or smaller.");
+  if (file.size < 1 || file.size > MAX_MEDIA_BYTES) {
+    throw new Error("Each media item must be 2 MiB or smaller, with a 2 MiB daily allowance per user.");
   }
 }
 
-export async function uploadHomePhoto(file) {
-  ensureImage(file);
-
+async function upload(file, feature, allowedTypes) {
+  ensureFile(file, allowedTypes, feature === "home_post" ? "media" : "image");
   const ticket = await api.createMediaUpload({
-    feature: "home_post",
+    feature,
     mimeType: file.type,
     sizeBytes: file.size,
     originalName: file.name
   });
-
   const put = await fetch(ticket.uploadUrl, {
     method: "PUT",
-    headers: ticket.requiredHeaders || { "Content-Type": file.type },
+    headers: ticket.requiredHeaders || {"Content-Type": file.type},
     body: file
   });
-
-  if (!put.ok) {
-    throw new Error("The image could not be uploaded.");
-  }
-
-  await api.finalizeMediaUpload({ mediaId: ticket.mediaId });
+  if (!put.ok) throw new Error("The media upload could not be completed.");
+  await api.finalizeMediaUpload({mediaId: ticket.mediaId});
   return ticket.mediaId;
+}
+
+export function validateHomeFiles(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return [];
+  if (list.length > MAX_HOME_MEDIA_ITEMS) {
+    throw new Error(`A post can contain up to ${MAX_HOME_MEDIA_ITEMS} media items.`);
+  }
+  list.forEach((file) => ensureFile(file, ALLOWED_HOME_MEDIA_TYPES, "media"));
+  const totalBytes = list.reduce((sum, file) => sum + file.size, 0);
+  if (totalBytes > DAILY_MEDIA_BYTES) {
+    throw new Error("The selected media exceeds your 2 MiB daily allowance.");
+  }
+  return list;
+}
+
+export async function uploadHomeMedia(file) {
+  return upload(file, "home_post", ALLOWED_HOME_MEDIA_TYPES);
+}
+
+export async function uploadHomePhoto(file) {
+  return uploadHomeMedia(file);
+}
+
+export async function uploadHomeMediaFiles(files) {
+  const list = validateHomeFiles(files);
+  const ids = [];
+  for (const file of list) ids.push(await uploadHomeMedia(file));
+  return ids;
 }
 
 export async function readPostMedia(postId, mediaIds) {
@@ -55,29 +89,8 @@ export async function readPostMedia(postId, mediaIds) {
   return Array.isArray(result?.urls) ? result.urls : [];
 }
 
-
 export async function uploadMomentPhoto(file) {
-  ensureImage(file);
-
-  const ticket = await api.createMediaUpload({
-    feature: "moment",
-    mimeType: file.type,
-    sizeBytes: file.size,
-    originalName: file.name
-  });
-
-  const put = await fetch(ticket.uploadUrl, {
-    method: "PUT",
-    headers: ticket.requiredHeaders || {"Content-Type": file.type},
-    body: file
-  });
-
-  if (!put.ok) {
-    throw new Error("The Moment image could not be uploaded.");
-  }
-
-  await api.finalizeMediaUpload({mediaId: ticket.mediaId});
-  return ticket.mediaId;
+  return upload(file, "moment", ALLOWED_MOMENT_MEDIA_TYPES);
 }
 
 export async function readMomentMedia(momentId, mediaIds) {

@@ -11,8 +11,8 @@ export const firebaseConfig = {
 // Public production reCAPTCHA Enterprise/App Check web key.
 export const appCheckSiteKey = "6LcYItwtAAAAAFWkMn7GYro06LuG3VMR1K0U1Xgb";
 
-// Optional until Browser Push is fully certified in production.
-export const vapidKey = "";
+// Public Web Push VAPID key used by Firebase Cloud Messaging.
+export const vapidKey = "BLjOBXC2DAJoHgkxMY-Mc1DITVEPJN4rpjnKXXqxNshR42dw0OmkjT9dzzFQlPL839jUE6JGaBotyQv_g27bMNE";
 
 export const appMeta = {
   name: "Marvel Chat",

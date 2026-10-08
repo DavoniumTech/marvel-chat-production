@@ -20,7 +20,7 @@ const names = [
 const fns = Object.fromEntries(names.map((name) => [name, httpsCallable(name)]));
 
 export async function call(name, data = {}) {
-  if (!fns[name]) throw new Error(`Unknown backend function: ${name}`);
+  if (!fns[name]) throw new Error(`Unknown operation: ${name}`);
 
   {
     const ok = await appCheckReady();

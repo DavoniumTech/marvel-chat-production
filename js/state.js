@@ -37,6 +37,7 @@ export const state = {
   theme: localStorage.getItem("marvel-theme") || "system",
   resolvedTheme: "light",
   loadingRoute: false,
+  busyAction: "",
   unsubscribers: [],
   threadPeers: readDraft("marvel-thread-peers", {}),
   sellerDraft: readDraft("marvel-seller-draft", {
@@ -75,7 +76,9 @@ export const state = {
   myProducts: [],
   commerceRequests: [],
   pendingMediaFile: null,
-  pendingMomentFile: null
+  pendingMediaFiles: [],
+  pendingMomentFile: null,
+  pushEnabled: false
 };
 
 export function resolveTheme() {
