@@ -46,3 +46,6 @@ Never put Firebase Admin credentials, service-account files, Cloudflare R2 priva
 ## Windows
 
 See `OPEN-IN-VSCODE.cmd` and `docs/LAUNCH-CHECKLIST.md`.
+
+
+Production media: browser-side image/video optimization runs before the real R2 signed upload, while the backend remains authoritative for the 2 MiB per-user daily quota.

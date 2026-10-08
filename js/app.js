@@ -14,7 +14,7 @@ import {
 } from "./ui.js";
 import {icon} from "./icons.js";
 import {
-  uploadHomePhoto, uploadHomeMedia, readPostMedia, uploadMomentPhoto, readMomentMedia, validateHomeFiles
+  uploadHomePhoto, uploadHomeMedia, uploadHomeMediaFiles, readPostMedia, uploadMomentPhoto, readMomentMedia, validateHomeFiles
 } from "./media.js";
 
 const app = document.getElementById("app");
@@ -24,19 +24,23 @@ const routes = [
   "seller-onboarding", "skill-onboarding"
 ];
 const MARKET_CATEGORIES = [
-  ["all", "All"], ["electronics", "Electronics"], ["fashion", "Fashion"],
-  ["home", "Home"], ["beauty", "Beauty"], ["food", "Food"],
-  ["services", "Services"], ["other", "Other"]
+  ["all", "All"], ["electronics", "Electronics"], ["phones", "Phones & Tablets"],
+  ["computers", "Computers"], ["fashion", "Fashion"], ["beauty", "Beauty & Personal Care"],
+  ["home", "Home & Living"], ["furniture", "Furniture"], ["food", "Food & Drinks"],
+  ["health", "Health"], ["automotive", "Automotive"], ["agriculture", "Agriculture"],
+  ["sports", "Sports & Fitness"], ["baby", "Baby & Kids"], ["books", "Books & Education"],
+  ["services", "Services"], ["property", "Property"], ["arts", "Arts & Collectibles"],
+  ["events", "Events"], ["other", "Other"]
 ];
 const SKILL_CATEGORIES = [
-  ["all", "All"], ["design", "Design"], ["programming", "Programming"],
-  ["writing", "Writing"], ["marketing", "Marketing"], ["education", "Education"],
-  ["business", "Business"], ["translation", "Translation"], ["photography", "Photography"],
-  ["video", "Video"], ["music", "Music"], ["beauty", "Beauty"],
-  ["fashion", "Fashion"], ["consulting", "Consulting"], ["repair", "Repairs"],
-  ["personal", "Personal services"], ["other", "Other"]
+  ["all", "All"], ["design", "Design"], ["programming", "Programming"], ["writing", "Writing"],
+  ["marketing", "Marketing"], ["education", "Education"], ["business", "Business"], ["translation", "Translation"],
+  ["photography", "Photography"], ["video", "Video"], ["music", "Music"], ["beauty", "Beauty"],
+  ["fashion", "Fashion"], ["consulting", "Consulting"], ["repair", "Repairs"], ["personal", "Personal services"],
+  ["fitness", "Fitness"], ["tutoring", "Tutoring"], ["engineering", "Engineering"], ["other", "Other"]
 ];
 let authMode = "welcome";
+let googleSignInPending = false;
 try { initAppCheck(); } catch {}
 
 function googleButton() {
@@ -137,17 +141,21 @@ function bottomBar() {
 }
 
 function sideMenu() {
-  return `<div class="menu-layer" data-action="close-menu"><aside class="side-menu">
-    <div class="menu-head"><div><span class="eyebrow">MARVEL CHAT</span><h2>More</h2></div><button class="icon-btn" type="button" data-action="close-menu" aria-label="Close">${icon("close",20)}</button></div>
-    <button class="menu-item" type="button" data-action="route-search">${icon("search")}Search</button>
-    <button class="menu-item" type="button" data-action="route-notifications">${icon("bell")}Notifications</button>
-    <button class="menu-item" type="button" data-action="route-settings">${icon("settings")}Settings</button>
-    <div class="menu-sep"></div>
-    <button class="menu-item" type="button" data-action="legal-terms">${icon("file")}Terms</button>
-    <button class="menu-item" type="button" data-action="legal-privacy">${icon("lock")}Privacy</button>
-    <button class="menu-item" type="button" data-action="legal-community">${icon("shield")}Community Guidelines</button>
-    <div class="menu-foot">Davonium Technologies · © 2026</div>
-  </aside></div>`;
+  return `<div id="menu-overlay" class="menu-layer" data-action="close-menu" aria-hidden="false">
+    <aside class="side-menu" role="dialog" aria-modal="true" aria-label="More">
+      <div class="menu-head"><div><span class="eyebrow">MARVEL CHAT</span><h2>More</h2></div>
+        <button class="icon-btn" type="button" data-action="close-menu" aria-label="Close menu">${icon("close",20)}</button>
+      </div>
+      <button class="menu-item" type="button" data-action="route-search">${icon("search")}Search</button>
+      <button class="menu-item" type="button" data-action="route-notifications">${icon("bell")}Notifications</button>
+      <button class="menu-item" type="button" data-action="route-settings">${icon("settings")}Settings</button>
+      <div class="menu-sep"></div>
+      <button class="menu-item" type="button" data-action="legal-terms">${icon("file")}Terms</button>
+      <button class="menu-item" type="button" data-action="legal-privacy">${icon("lock")}Privacy</button>
+      <button class="menu-item" type="button" data-action="legal-community">${icon("shield")}Community Guidelines</button>
+      <div class="menu-foot">Davonium Technologies · © 2026</div>
+    </aside>
+  </div>`;
 }
 
 function shell(content, noBottom = false) {
@@ -156,8 +164,8 @@ function shell(content, noBottom = false) {
 function emptyState(title, text, action = "", label = "") {
   return `<div class="empty-state"><div class="empty-icon">${icon("spark",19)}</div><strong>${esc(title)}</strong><span>${esc(text)}</span>${action ? `<button class="btn btn-secondary" type="button" data-action="${esc(action)}">${esc(label)}</button>` : ""}</div>`;
 }
-function head(kicker, title, desc = "", action = "", label = "") {
-  return `<header class="screen-head"><div><span class="eyebrow">${esc(kicker)}</span><h1>${esc(title)}</h1>${desc ? `<p>${esc(desc)}</p>` : ""}</div>${action ? `<button class="btn btn-primary" type="button" data-action="${esc(action)}">${icon("plus",17)}${esc(label)}</button>` : ""}</header>`;
+function head(kicker, title, desc = "", action = "", label = "", back = "") {
+  return `<header class="screen-head"><div class="screen-head-main">${back ? `<button class="page-back" type="button" data-action="route-${esc(back)}" aria-label="Back">${icon("back",18)}<span>Back</span></button>` : ""}<div><span class="eyebrow">${esc(kicker)}</span><h1>${esc(title)}</h1>${desc ? `<p>${esc(desc)}</p>` : ""}</div></div>${action ? `<button class="btn btn-primary" type="button" data-action="${esc(action)}">${icon("plus",17)}${esc(label)}</button>` : ""}</header>`;
 }
 function stamp(v) { return v?.toDate ? v.toDate().getTime() : new Date(v || 0).getTime(); }
 function uidOf(x) { return x?.uid || x?.userId || x?.authorUid || x?.creatorUid || x?.ownerUid || ""; }
@@ -185,12 +193,68 @@ function safeMinor(value) { const n = Number(value); return Number.isSafeInteger
 function money(minor, currency = "NGN") { return `${esc(currency)} ${(Math.max(0, Number(minor) || 0) / 100).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}`; }
 function firstName() { return String(state.profile?.displayName || state.user?.displayName || "friend").trim().split(/\s+/)[0] || "friend"; }
 
+function followLabel(targetUid) {
+  return state.followingIds.includes(String(targetUid)) ? "Following" : "Follow";
+}
+
+async function getPublicUserPosts(targetUid) {
+  try {
+    const snap = await getDocs(query(
+        collection(db, "posts"),
+        where("authorUid", "==", targetUid),
+        where("visibility", "==", "public"),
+        where("status", "==", "active"),
+        limit(10),
+    ));
+    return snap.docs
+        .map((d) => ({id: d.id, ...d.data()}))
+        .sort((a, b) => stamp(b.createdAt) - stamp(a.createdAt));
+  } catch (error) {
+    console.debug("[Marvel Chat] public profile posts unavailable", error?.code, error?.message);
+    return [];
+  }
+}
+
+async function openPublicUserProfile(targetUid, supplied = {}) {
+  if (!targetUid || targetUid === state.user.uid) return;
+  let profile = {uid: targetUid, ...(supplied?.result || supplied || {})};
+  try {
+    const snap = await getDoc(doc(db, "users", targetUid));
+    if (snap.exists()) profile = {uid: targetUid, ...snap.data(), ...profile};
+  } catch {}
+
+  let following = state.followingIds.includes(String(targetUid));
+  let followersCount = 0;
+  try {
+    const stateResult = await api.getFollowState({targetUid});
+    following = Boolean(stateResult?.following);
+    followersCount = Number(stateResult?.followersCount || 0);
+  } catch {}
+
+  if (following) {
+    state.followingIds = [...new Set([...state.followingIds, String(targetUid)])];
+  }
+
+  const posts = await getPublicUserPosts(targetUid);
+  const recentPosts = posts.length ? posts.slice(0, 6).map((post) =>
+      `<article class="mini-post"><strong>${esc(post.text || "Shared a media post")}</strong><small>${when(post.createdAt)}</small></article>`
+  ).join("") : `<div class="muted">No public posts available yet.</div>`;
+
+  modal(
+      profile.displayName || profile.username || "Member",
+      `<div class="public-profile"><div class="public-profile-top">${avatar(profile, "xl", false)}<div><h3>${esc(profile.displayName || profile.username || "Member")}</h3><p>${esc(profile.username ? `@${profile.username}` : "Community member")}</p>${profile.bio ? `<p>${esc(profile.bio)}</p>` : ""}</div></div><div class="profile-stat-line"><span><strong>${followersCount}</strong> followers</span></div><section class="section mini-posts"><div class="section-head compact"><div><span class="eyebrow">COMMUNITY</span><h3>Recent posts</h3></div></div>${recentPosts}</section></div>`,
+      `<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-secondary" type="button" data-action="message-user" data-id="${esc(targetUid)}">Message</button><button class="btn btn-primary" type="button" data-action="${following ? "unfollow-user" : "follow-user"}" data-id="${esc(targetUid)}">${following ? "Following" : "Follow"}</button>`,
+      {wide: true},
+  );
+}
+
 function searchResultCard(item) {
   const p = item?.result || item || {};
   const type = String(item?.type || "result").toLowerCase();
   if (type === "user" || type === "person") {
     const id = item?.id || p.uid || p.id || "";
-    return `<article class="result compact-result">${avatar(p,"sm",true)}<div class="grow"><strong>${esc(item?.title || p.displayName || p.username || "Member")}</strong><small>${esc(item?.subtitle || item?.subTitle || (p.username ? `@${p.username}` : p.bio || "Community member"))}</small></div>${id && id !== state.user.uid ? `<div class="result-actions"><button class="btn btn-secondary" type="button" data-action="message-user" data-id="${esc(id)}">Message</button><button class="btn btn-secondary" type="button" data-action="follow-user" data-id="${esc(id)}">Follow</button></div>` : ""}</article>`;
+    const following = state.followingIds.includes(String(id));
+    return `<article class="result compact-result">${avatar(p,"sm",true)}<div class="grow"><strong>${esc(item?.title || p.displayName || p.username || "Member")}</strong><small>${esc(item?.subtitle || item?.subTitle || (p.username ? `@${p.username}` : p.bio || "Community member"))}</small></div>${id && id !== state.user.uid ? `<div class="result-actions"><button class="btn btn-secondary" type="button" data-action="view-user" data-id="${esc(id)}">View</button><button class="btn btn-secondary" type="button" data-action="message-user" data-id="${esc(id)}">Message</button><button class="btn btn-secondary" type="button" data-action="${following ? "unfollow-user" : "follow-user"}" data-id="${esc(id)}">${following ? "Following" : "Follow"}</button></div>` : ""}</article>`;
   }
   if (type === "skill_listing") {
     return `<article class="result compact-result"><div class="result-icon">${icon("skills",18)}</div><div class="grow"><strong>${esc(item?.title || p.title || "Skill listing")}</strong><small>${esc(item?.subtitle || item?.subTitle || p.description || "")}</small></div><button class="btn btn-secondary" type="button" data-action="skill-search-view" data-id="${esc(item.id || "")}">View</button></article>`;
@@ -373,13 +437,13 @@ function renderHome() {
       return `<figure><img src="${esc(m.url)}" alt="Photo shared by ${esc(author.displayName || "a community member")}" loading="lazy" decoding="async"></figure>`;
     }).join("")}</div>` : (Array.isArray(p.mediaIds) && p.mediaIds.length ? `<button class="media-placeholder" type="button" data-action="load-post-media" data-id="${esc(p.id)}">${icon("camera",17)}<span>Load ${p.mediaIds.length > 1 ? `${p.mediaIds.length} media items` : "media"}</span></button>` : "");
     return `<article class="post-card modern-post" data-post-id="${esc(p.id)}">
-      <header class="post-head">${avatar(author,"md",true)}<div class="grow"><strong>${esc(author.displayName || "Community member")}</strong><span>${esc(author.username ? `@${author.username}` : "Community")} · ${when(p.createdAt)}</span></div>${uidOf(p) === state.user.uid ? `<button class="icon-btn" type="button" data-action="post-menu" data-id="${esc(p.id)}" aria-label="Post options">${icon("menuDots",19)}</button>` : ""}</header>
+      <header class="post-head">${avatar(author,"md",true)}<div class="grow"><strong>${esc(author.displayName || "Community member")}</strong><span>${esc(author.username ? `@${author.username}` : "Community")} · ${when(p.createdAt)}</span></div>${uidOf(p) === state.user.uid ? `<button class="icon-btn" type="button" data-action="post-menu" data-id="${esc(p.id)}" aria-label="Post options">${icon("menuDots",19)}</button>` : `<button class="post-follow" type="button" data-action="${state.followingIds.includes(String(uidOf(p))) ? "unfollow-user" : "follow-user"}" data-id="${esc(uidOf(p))}" aria-label="${followLabel(uidOf(p))}">${followLabel(uidOf(p))}</button>`}</header>
       <div class="post-body">${p.text ? `<p>${esc(p.text)}</p>` : ""}${mediaHtml}</div>
       <footer class="post-actions"><button type="button" data-action="like-post" data-id="${esc(p.id)}">${icon("heart",18)}Like <span>${Number(p.reactionCount || 0) || ""}</span></button><button type="button" data-action="comment-post" data-id="${esc(p.id)}">${icon("comment",18)}Comment <span>${Number(p.commentCount || 0) || ""}</span></button><button type="button" data-action="save-post" data-id="${esc(p.id)}">${icon("bookmark",18)}Save</button><button type="button" data-action="share-post" data-id="${esc(p.id)}">${icon("arrow",18)}Share</button></footer>
     </article>`;
   };
   return `<section class="screen home-screen">
-    <section class="surface-card moments-panel home-moments"><div class="section-head compact"><div><span class="eyebrow">MOMENTS</span><h2>Stories & updates</h2></div><button class="text-button" type="button" data-action="create-moment">Create</button></div><div class="moments-row">${own ? momentCard(own,true) : `<button class="moment-card own" type="button" data-action="create-moment"><div class="moment-ring add-ring">${avatar(state.profile || state.user,"md",true)}<span class="add-badge">${icon("plus",13)}</span></div><span class="moment-label">Add a Moment</span></button>`}${following.map((m) => momentCard(m)).join("")}</div></section>
+    <section class="home-moments"><div class="section-head compact"><div><span class="eyebrow">MOMENTS</span><h2>Stories & updates</h2></div><button class="text-button" type="button" data-action="create-moment">Create</button></div><div class="moments-row">${own ? momentCard(own,true) : `<button class="moment-card own" type="button" data-action="create-moment"><div class="moment-ring add-ring">${avatar(state.profile || state.user,"md",true)}<span class="add-badge">${icon("plus",13)}</span></div><span class="moment-label">Add a Moment</span></button>`}${following.map((m) => momentCard(m)).join("")}</div></section>
     ${contextualSearch("home-search-form","Search people, skills, products, or shops…","all",state.searchQuery)}
     ${state.homeSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">SEARCH</span><h2>Matches</h2></div><button class="text-button" type="button" data-action="clear-home-search">Clear</button></div><div class="results">${state.homeSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}
     <section class="section feed-section"><div class="section-head compact"><div><span class="eyebrow">COMMUNITY FEED</span><h2>Latest updates</h2></div></div>${state.posts.length ? state.posts.map(post).join("") : emptyState("Your feed is quiet","Community updates will appear here.","create-post","Create a post")}</section>
@@ -412,7 +476,7 @@ function renderSkillProfile() {
   const p = state.skillProfile;
   const mine = state.skillListingsMine;
   const requests = state.skillRequests.slice(0,12);
-  return `<section class="screen">${head("PROVIDER ACCOUNT","My Skills",p ? "Manage your provider profile and services." : "Create your provider account from Profile.",p ? "create-skill-listing" : "route-skill-onboarding",p ? "Add service" : "Create account")}<div class="workspace-card featured"><div class="workspace-icon">${icon("skills",22)}</div><div class="grow"><span class="eyebrow">PROVIDER PROFILE</span><h2>${esc(p?.headline || "Provider account")}</h2><p>${esc(p?.bio || "Your provider profile will appear here after setup.")}</p>${p ? `<div class="tags">${(p.categories || []).slice(0,6).map((c) => `<span>${esc(c)}</span>`).join("")}<span>${p.remote ? "Remote" : "On location"}</span></div>` : ""}</div></div>${p ? `<section class="section"><div class="section-head compact"><div><span class="eyebrow">MY SERVICES</span><h2>${mine.length} service${mine.length === 1 ? "" : "s"}</h2></div></div><div class="listing-grid">${mine.length ? mine.map((item) => `<article class="listing-card"><div class="listing-icon">${icon("skills",20)}</div><div class="grow"><h3>${esc(item.title || "Service")}</h3><p>${esc(item.description || "")}</p><small class="muted">${esc(item.status || "active")} · ${money(item.priceFromMinor,item.currency || "NGN")}</small></div><div class="stack-buttons"><button class="btn btn-secondary" type="button" data-action="edit-skill-listing" data-id="${esc(item.id)}">Edit</button>${item.status === "active" ? `<button class="btn btn-secondary" type="button" data-action="pause-skill-listing" data-id="${esc(item.id)}">Pause</button>` : item.status === "paused" ? `<button class="btn btn-secondary" type="button" data-action="activate-skill-listing" data-id="${esc(item.id)}">Offer</button>` : ""}<button class="btn btn-secondary" type="button" data-action="delete-skill-listing" data-id="${esc(item.id)}">Delete</button></div></article>`).join("") : emptyState("No services yet","Add your first service to appear in Marvel Skills.","create-skill-listing","Add service")}</div></section><section class="section"><div class="section-head compact"><div><span class="eyebrow">REQUESTS</span><h2>Skill activity</h2></div></div>${requests.length ? requests.map((r) => `<article class="notification"><div class="notification-icon">${icon("skills",18)}</div><div class="grow"><strong>${esc(r.title || "Skill request")}</strong><p>${esc(r.status || "open")}</p><small>${formatDate(r.updatedAt || r.createdAt)}</small></div></article>`).join("") : emptyState("No skill requests","Requests will appear here when members contact your services.")}</section>` : ""}</section>`;
+  return `<section class="screen">${head("PROVIDER ACCOUNT","My Skills",p ? "Manage your provider profile and services." : "Create your provider account from Profile.",p ? "create-skill-listing" : "route-skill-onboarding",p ? "Add service" : "Create account", "profile")}<div class="workspace-card featured"><div class="workspace-icon">${icon("skills",22)}</div><div class="grow"><span class="eyebrow">PROVIDER PROFILE</span><h2>${esc(p?.headline || "Provider account")}</h2><p>${esc(p?.bio || "Your provider profile will appear here after setup.")}</p>${p ? `<div class="tags">${(p.categories || []).slice(0,6).map((c) => `<span>${esc(c)}</span>`).join("")}<span>${p.remote ? "Remote" : "On location"}</span></div>` : ""}</div></div>${p ? `<section class="section"><div class="section-head compact"><div><span class="eyebrow">MY SERVICES</span><h2>${mine.length} service${mine.length === 1 ? "" : "s"}</h2></div></div><div class="listing-grid">${mine.length ? mine.map((item) => `<article class="listing-card"><div class="listing-icon">${icon("skills",20)}</div><div class="grow"><h3>${esc(item.title || "Service")}</h3><p>${esc(item.description || "")}</p><small class="muted">${esc(item.status || "active")} · ${money(item.priceFromMinor,item.currency || "NGN")}</small></div><div class="stack-buttons"><button class="btn btn-secondary" type="button" data-action="edit-skill-listing" data-id="${esc(item.id)}">Edit</button>${item.status === "active" ? `<button class="btn btn-secondary" type="button" data-action="pause-skill-listing" data-id="${esc(item.id)}">Pause</button>` : item.status === "paused" ? `<button class="btn btn-secondary" type="button" data-action="activate-skill-listing" data-id="${esc(item.id)}">Offer</button>` : ""}<button class="btn btn-secondary" type="button" data-action="delete-skill-listing" data-id="${esc(item.id)}">Delete</button></div></article>`).join("") : emptyState("No services yet","Add your first service to appear in Marvel Skills.","create-skill-listing","Add service")}</div></section><section class="section"><div class="section-head compact"><div><span class="eyebrow">REQUESTS</span><h2>Skill activity</h2></div></div>${requests.length ? requests.map((r) => `<article class="notification"><div class="notification-icon">${icon("skills",18)}</div><div class="grow"><strong>${esc(r.title || "Skill request")}</strong><p>${esc(r.status || "open")}</p><small>${formatDate(r.updatedAt || r.createdAt)}</small></div></article>`).join("") : emptyState("No skill requests","Requests will appear here when members contact your services.")}</section>` : ""}</section>`;
 }
 
 function renderMarket() {
@@ -424,7 +488,7 @@ function renderMarket() {
 function renderBusiness() {
   const s = state.myStore;
   const products = state.myProducts;
-  return `<section class="screen">${head("MY SHOP","My Shop",s ? "Manage your storefront, products, stock, and customer requests." : "Create your seller account from Profile.","route-seller-onboarding",s ? "Edit shop" : "Create shop")}
+  return `<section class="screen">${head("MY SHOP","My Shop",s ? "Manage your storefront, products, stock, and customer requests." : "Create your seller account from Profile.","route-seller-onboarding",s ? "Edit shop" : "Create shop", "profile")}
     <div class="business-hero"><div class="business-symbol">${icon("shop",25)}</div><div class="grow"><span class="eyebrow">MY SHOP</span><h2>${esc(s?.name || "Your shop")}</h2><p>${esc(s?.description || "Create your store, then add products and manage inventory and availability.")}</p>${s ? `<div class="tags"><span>${esc(s.status || "paused")}</span><span>${esc(s.category || "Uncategorized")}</span><span>${esc(s.location || s.locationText || "Location not set")}</span></div>` : ""}</div></div>
     ${!s ? emptyState("No shop yet","Create your seller account from Profile.","route-seller-onboarding","Create shop") : `<section class="section"><div class="section-head compact"><div><span class="eyebrow">CATALOGUE</span><h2>${products.length} product${products.length === 1 ? "" : "s"}</h2></div><div class="stack-buttons"><button class="btn btn-secondary" type="button" data-action="store-status-toggle" data-status="${esc(s.status === "active" ? "paused" : "active")}">${s.status === "active" ? "Pause store" : "Open store"}</button><button class="btn btn-primary" type="button" data-action="create-product">${icon("plus",17)}New product</button></div></div><div class="listing-grid">${products.length ? products.map((p) => `<article class="listing-card"><div class="listing-icon">${icon("market",20)}</div><div class="grow"><h3>${esc(p.title || "Product")}</h3><p>${esc(p.description || "")}</p><small class="muted">${esc(p.status || "draft")} · ${money(p.priceMinor,p.currency || "NGN")} · Stock ${Number(p.inventoryQuantity || 0)}</small></div><div class="stack-buttons"><button class="btn btn-secondary" type="button" data-action="edit-product" data-id="${esc(p.id)}">Edit</button><button class="btn btn-secondary" type="button" data-action="inventory-product" data-id="${esc(p.id)}">Stock</button>${p.status === "archived" ? "" : p.status === "active" ? `<button class="btn btn-secondary" type="button" data-action="pause-product" data-id="${esc(p.id)}">Pause</button>` : `<button class="btn btn-secondary" type="button" data-action="activate-product" data-id="${esc(p.id)}">Activate</button>`}<button class="btn btn-secondary" type="button" data-action="archive-product" data-id="${esc(p.id)}">Archive</button></div></article>`).join("") : emptyState("No products yet","Create your first real product listing.","create-product","Create product")}</div></section>
     <section class="section"><div class="section-head compact"><div><span class="eyebrow">COMMERCE REQUESTS</span><h2>Customer activity</h2></div></div><div>${state.commerceRequests.length ? state.commerceRequests.map((r) => `<article class="notification"><div class="notification-icon">${icon("market",18)}</div><div class="grow"><strong>${esc(r.requestId || r.id || "Commerce request")}</strong><p>${esc(r.status || "submitted")} · ${money(r.totalMinor,r.currency || "NGN")}</p><small>${formatDate(r.updatedAt || r.createdAt)}</small></div><div class="stack-buttons">${r.status === "submitted" ? `<button class="btn btn-secondary" type="button" data-action="commerce-status" data-id="${esc(r.id)}" data-status="accepted">Accept</button><button class="btn btn-secondary" type="button" data-action="commerce-status" data-id="${esc(r.id)}" data-status="cancelled">Cancel</button>` : r.status === "accepted" ? `<button class="btn btn-secondary" type="button" data-action="commerce-status" data-id="${esc(r.id)}" data-status="processing">Processing</button>` : r.status === "processing" ? `<button class="btn btn-secondary" type="button" data-action="commerce-status" data-id="${esc(r.id)}" data-status="ready">Ready</button>` : r.status === "ready" ? `<button class="btn btn-secondary" type="button" data-action="commerce-status" data-id="${esc(r.id)}" data-status="completed">Complete</button>` : ""}</div></article>`).join("") : emptyState("No commerce requests","Customer requests will appear here.")}</div></section>`}`;
@@ -441,7 +505,7 @@ function renderSellerOnboarding() {
     ["Business details","Add the name, description, category, and location customers will see.","edit"]
   ];
   const p = pages[step];
-  return `<section class="screen onboarding-screen"><div class="onboarding-shell"><div class="stepper">${steps.map((x,i) => `<span class="step-dot ${i <= step ? "active" : ""}">${i < step ? icon("check",13) : i+1}</span>${i < steps.length-1 ? `<i class="step-line ${i < step ? "active" : ""}"></i>` : ""}`).join("")}</div><div class="onboarding-card"><div class="onboarding-icon">${icon(p[2],26)}</div><span class="eyebrow">${esc(steps[step])}</span><h1>${esc(p[0])}</h1><p class="onboarding-copy">${esc(p[1])}</p>${step === 2 ? `<label class="agree-row large"><input type="checkbox" id="seller-agreement" ${d.agreed ? "checked" : ""}><span>I accept the seller standards and marketplace responsibilities.</span></label>` : ""}${step === 3 ? `<form id="seller-details-form" class="form-stack compact-form"><label class="floating-field"><input name="name" value="${esc(d.name || "")}" maxlength="120" required><span>Business name</span></label><label class="floating-field"><textarea name="description" maxlength="1000">${esc(d.description || "")}</textarea><span>Business description</span></label><label class="floating-field"><input name="category" value="${esc(d.category || "")}" maxlength="100" placeholder=" "><span>Business category</span></label><label class="floating-field"><input name="location" value="${esc(d.location || "")}" maxlength="200" placeholder=" "><span>Business location</span></label></form>` : ""}<div class="onboarding-actions"><button class="btn btn-secondary" type="button" data-action="onboarding-back" ${step===0 ? "disabled" : ""}>Back</button><button class="btn btn-primary" type="button" data-action="onboarding-next">${step===3 ? (d.storeId ? "Update store" : "Create store") : "Continue"}</button></div></div><button class="text-button" type="button" data-action="route-business">Exit setup</button></div></section>`;
+  return `<section class="screen onboarding-screen"><div class="onboarding-shell"><div class="page-back-wrap"><button class="page-back" type="button" data-action="route-profile" aria-label="Back to Profile">${icon("back",18)}<span>Back to Profile</span></button></div><div class="stepper">${steps.map((x,i) => `<span class="step-dot ${i <= step ? "active" : ""}">${i < step ? icon("check",13) : i+1}</span>${i < steps.length-1 ? `<i class="step-line ${i < step ? "active" : ""}"></i>` : ""}`).join("")}</div><div class="onboarding-card"><div class="onboarding-icon">${icon(p[2],26)}</div><span class="eyebrow">${esc(steps[step])}</span><h1>${esc(p[0])}</h1><p class="onboarding-copy">${esc(p[1])}</p>${step === 2 ? `<label class="agree-row large"><input type="checkbox" id="seller-agreement" ${d.agreed ? "checked" : ""}><span>I accept the seller standards and marketplace responsibilities.</span></label>` : ""}${step === 3 ? `<form id="seller-details-form" class="form-stack compact-form"><label class="floating-field"><input name="name" value="${esc(d.name || "")}" maxlength="120" required><span>Business name</span></label><label class="floating-field"><textarea name="description" maxlength="1000">${esc(d.description || "")}</textarea><span>Business description</span></label><label class="floating-field"><input name="category" value="${esc(d.category || "")}" maxlength="100" placeholder=" "><span>Business category</span></label><label class="floating-field"><input name="location" value="${esc(d.location || "")}" maxlength="200" placeholder=" "><span>Business location</span></label></form>` : ""}<div class="onboarding-actions"><button class="btn btn-secondary" type="button" data-action="onboarding-back" ${step===0 ? "disabled" : ""}>Back</button><button class="btn btn-primary" type="button" data-action="onboarding-next">${step===3 ? (d.storeId ? "Update store" : "Create store") : "Continue"}</button></div></div><button class="text-button" type="button" data-action="route-business">Exit setup</button></div></section>`;
 }
 
 function renderSkillOnboarding() {
@@ -455,7 +519,7 @@ function renderSkillOnboarding() {
   if (step === 1) form = `<form id="skill-details-form" class="form-stack compact-form"><label class="floating-field"><input name="locationText" maxlength="160" value="${esc(d.locationText || "")}" placeholder=" "><span>Location</span></label><label class="select-field"><span>Remote availability</span><select name="remote"><option value="true" ${d.remote !== false ? "selected" : ""}>Remote available</option><option value="false" ${d.remote === false ? "selected" : ""}>On location</option></select></label><label class="floating-field"><input name="yearsExperience" type="number" min="0" max="80" value="${Number(d.yearsExperience || 0)}" required><span>Years of experience</span></label></form>`;
   if (step === 2) form = `<form id="skill-details-form" class="form-stack compact-form"><label class="select-field"><span>Primary category</span><select name="category" required>${categoryOptions.map(([id,label]) => `<option value="${esc(id)}" ${d.category === id ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label><label class="floating-field"><input name="listingTitle" maxlength="160" value="${esc(d.listingTitle || "")}" required><span>Service title</span></label><label class="floating-field"><textarea name="listingDescription" maxlength="3000" required>${esc(d.listingDescription || "")}</textarea><span>Service description</span></label><label class="floating-field"><input name="priceFromMinor" type="number" min="0" value="${esc(d.priceFromMinor || "")}" placeholder=" "><span>Starting price (minor units)</span></label><label class="floating-field"><input name="deliveryTimeDays" type="number" min="1" max="365" value="${esc(d.deliveryTimeDays || "")}" placeholder=" "><span>Delivery time in days</span></label><label class="floating-field"><input name="tags" maxlength="500" value="${esc(d.tags || "")}" placeholder=" "><span>Tags, comma separated</span></label></form>`;
   if (step === 3) form = `<div class="review-card"><strong>${esc(d.headline || "Provider")}</strong><p>${esc(d.bio || "")}</p><span>${esc(d.category || "No category")}</span><p>${esc(d.listingTitle || "No listing title")}</p><small>${esc(d.listingDescription || "")}</small></div>`;
-  return `<section class="screen onboarding-screen"><div class="onboarding-shell"><div class="stepper">${steps.map((x,i) => `<span class="step-dot ${i <= step ? "active" : ""}">${i < step ? icon("check",13) : i+1}</span>${i < steps.length-1 ? `<i class="step-line ${i < step ? "active" : ""}"></i>` : ""}`).join("")}</div><div class="onboarding-card"><div class="onboarding-icon">${icon(page[2],26)}</div><span class="eyebrow">${esc(steps[step])}</span><h1>${esc(page[0])}</h1><p class="onboarding-copy">${esc(page[1])}</p>${form}<div class="onboarding-actions"><button class="btn btn-secondary" type="button" data-action="skill-onboarding-back" ${step===0 ? "disabled" : ""}>Back</button><button class="btn btn-primary" type="button" data-action="skill-onboarding-next">${step===3 ? "Publish profile + listing" : "Continue"}</button></div></div><button class="text-button" type="button" data-action="route-skill-profile">Exit setup</button></div></section>`;
+  return `<section class="screen onboarding-screen"><div class="onboarding-shell"><div class="page-back-wrap"><button class="page-back" type="button" data-action="route-profile" aria-label="Back to Profile">${icon("back",18)}<span>Back to Profile</span></button></div><div class="stepper">${steps.map((x,i) => `<span class="step-dot ${i <= step ? "active" : ""}">${i < step ? icon("check",13) : i+1}</span>${i < steps.length-1 ? `<i class="step-line ${i < step ? "active" : ""}"></i>` : ""}`).join("")}</div><div class="onboarding-card"><div class="onboarding-icon">${icon(page[2],26)}</div><span class="eyebrow">${esc(steps[step])}</span><h1>${esc(page[0])}</h1><p class="onboarding-copy">${esc(page[1])}</p>${form}<div class="onboarding-actions"><button class="btn btn-secondary" type="button" data-action="skill-onboarding-back" ${step===0 ? "disabled" : ""}>Back</button><button class="btn btn-primary" type="button" data-action="skill-onboarding-next">${step===3 ? "Publish profile + listing" : "Continue"}</button></div></div><button class="text-button" type="button" data-action="route-skill-profile">Exit setup</button></div></section>`;
 }
 
 function renderProfile() {
@@ -468,11 +532,11 @@ function renderProfile() {
 
 function renderSearch() {
   const results = state.searchResults.slice(0,24);
-  return `<section class="screen">${head("DISCOVERY","Search","Find people, skills, products, and shops.")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search everything…" autocomplete="off"></label><select name="scope"><option value="all" ${state.searchScope === "all" ? "selected" : ""}>Everything</option><option value="users" ${state.searchScope === "users" ? "selected" : ""}>People</option><option value="skills" ${state.searchScope === "skills" ? "selected" : ""}>Skills</option><option value="market" ${state.searchScope === "market" ? "selected" : ""}>Market</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching","Search by name, username, skill, product, or shop.")}</div></section>`;
+  return `<section class="screen">${head("DISCOVERY","Search","Find people, skills, products, and shops.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search everything…" autocomplete="off"></label><select name="scope"><option value="all" ${state.searchScope === "all" ? "selected" : ""}>Everything</option><option value="users" ${state.searchScope === "users" ? "selected" : ""}>People</option><option value="skills" ${state.searchScope === "skills" ? "selected" : ""}>Skills</option><option value="market" ${state.searchScope === "market" ? "selected" : ""}>Market</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching","Search by name, username, skill, product, or shop.")}</div></section>`;
 }
-function renderNotifications() { return `<section class="screen">${head("UPDATES","Notifications",state.unreadNotifications ? `${state.unreadNotifications} unread` : "You are all caught up.")}<div>${state.notifications.length ? state.notifications.map((n) => `<article class="notification ${n.read || n.isRead || n.readAt ? "" : "unread"}"><div class="notification-icon">${icon("bell",18)}</div><div class="grow"><strong>${esc(n.title || "Marvel Chat")}</strong><p>${esc(n.body || "")}</p><small>${when(n.createdAt)}</small></div>${!(n.read || n.isRead || n.readAt) ? `<button class="text-button" type="button" data-action="read-notification" data-id="${esc(n.id)}">Mark read</button>` : ""}</article>`).join("") : emptyState("No new notifications","Activity updates will appear here.")}</div></section>`; }
+function renderNotifications() { return `<section class="screen">${head("UPDATES","Notifications",state.unreadNotifications ? `${state.unreadNotifications} unread` : "You are all caught up.", "", "", "home")}<div>${state.notifications.length ? state.notifications.map((n) => `<article class="notification ${n.read || n.isRead || n.readAt ? "" : "unread"}"><div class="notification-icon">${icon("bell",18)}</div><div class="grow"><strong>${esc(n.title || "Marvel Chat")}</strong><p>${esc(n.body || "")}</p><small>${when(n.createdAt)}</small></div>${!(n.read || n.isRead || n.readAt) ? `<button class="text-button" type="button" data-action="read-notification" data-id="${esc(n.id)}">Mark read</button>` : ""}</article>`).join("") : emptyState("No new notifications","Activity updates will appear here.")}</div></section>`; }
 function renderSettings() {
-  return `<section class="screen">${head("PREFERENCES","Settings","Choose how Marvel Chat looks and behaves.")}<div class="settings-list"><article class="setting-card"><div class="setting-copy"><strong>Appearance</strong><small>Choose the theme used across the application.</small></div><div class="theme-pills">${["light","dark","system"].map((x) => `<button class="${state.theme === x ? "active" : ""}" type="button" data-action="theme-${x}">${icon(x === "light" ? "sun" : x === "dark" ? "moon" : "system",16)}${x[0].toUpperCase()+x.slice(1)}</button>`).join("")}</div></article><article class="setting-card"><div class="setting-copy"><strong>Notifications</strong><small>Receive Marvel Chat updates on this browser when permission is enabled.</small></div>${state.pushEnabled ? `<button class="btn btn-secondary" type="button" data-action="disable-notifications">Disable</button>` : `<button class="btn btn-primary" type="button" data-action="enable-notifications">Enable</button>`}</article><button class="setting-card setting-link" type="button" data-action="legal-terms"><div class="setting-copy"><strong>Terms</strong><small>Review our service terms.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-privacy"><div class="setting-copy"><strong>Privacy</strong><small>Learn how account and activity data are handled.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-community"><div class="setting-copy"><strong>Community Guidelines</strong><small>Our standards for a useful and trustworthy community.</small></div>${icon("arrow",18)}</button></div></section>`;
+  return `<section class="screen">${head("PREFERENCES","Settings","Choose how Marvel Chat looks and behaves.", "", "", "profile")}<div class="settings-list"><article class="setting-card"><div class="setting-copy"><strong>Appearance</strong><small>Choose the theme used across the application.</small></div><div class="theme-pills">${["light","dark","system"].map((x) => `<button class="${state.theme === x ? "active" : ""}" type="button" data-action="theme-${x}">${icon(x === "light" ? "sun" : x === "dark" ? "moon" : "system",16)}${x[0].toUpperCase()+x.slice(1)}</button>`).join("")}</div></article><article class="setting-card"><div class="setting-copy"><strong>Notifications</strong><small>Receive Marvel Chat updates on this browser when permission is enabled.</small></div>${state.pushEnabled ? `<button class="btn btn-secondary" type="button" data-action="disable-notifications">Disable</button>` : `<button class="btn btn-primary" type="button" data-action="enable-notifications">Enable</button>`}</article><button class="setting-card setting-link" type="button" data-action="legal-terms"><div class="setting-copy"><strong>Terms</strong><small>Review our service terms.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-privacy"><div class="setting-copy"><strong>Privacy</strong><small>Learn how account and activity data are handled.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-community"><div class="setting-copy"><strong>Community Guidelines</strong><small>Our standards for a useful and trustworthy community.</small></div>${icon("arrow",18)}</button></div></section>`;
 }
 
 function getBrowserDeviceIds() {
@@ -583,12 +647,12 @@ async function signup(form) {
 function openCreatePost() {
   state.pendingMediaFile = null;
   state.pendingMediaFiles = [];
-  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add photos or a video</strong><small>Up to 10 media items · 2 MiB daily allowance · each item up to 2 MiB</small></span><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple></label><div id="post-media-preview" class="post-media-picker"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
+  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add photos or a video</strong><small>Up to 10 media items · photos/videos are optimized automatically · 2 MiB total daily allowance</small></span><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple></label><div id="post-media-preview" class="post-media-picker"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
 }
 
 function openCreateMoment() {
   state.pendingMomentFile = null;
-  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo</option><option value="photo_text">Photo + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add a photo</strong><small>Required for photo/photo + text Moments · 2 MiB daily allowance · each photo up to 2 MiB</small></span><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
+  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo</option><option value="photo_text">Photo + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add a photo</strong><small>Required for photo/photo + text Moments · photo optimized automatically · 2 MiB daily allowance</small></span><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
 }
 
 function openComment(postId) {
@@ -650,16 +714,43 @@ document.addEventListener("click", async (e) => {
     if (a === "auth-signup") { authMode="signup"; paint(); return; }
     if (a === "forgot-password") { authMode="forgot"; paint(); return; }
     if (a === "toggle-password") { const t=document.getElementById(actionEl.dataset.target); if(t){t.type=t.type === "password" ? "text" : "password"; actionEl.textContent=t.type === "password" ? "Show" : "Hide";} return; }
-    if (a === "google-signin") { const provider=new GoogleAuthProvider(); await signInWithPopup(auth,provider); return; }
+    if (a === "google-signin") {
+      if (googleSignInPending) return;
+      googleSignInPending = true;
+      document.querySelectorAll('[data-action="google-signin"]').forEach((button) => {
+        button.disabled = true;
+      });
+      try {
+        await signInWithPopup(auth, new GoogleAuthProvider());
+      } finally {
+        googleSignInPending = false;
+        document.querySelectorAll('[data-action="google-signin"]').forEach((button) => {
+          button.disabled = false;
+        });
+      }
+      return;
+    }
     if (a.startsWith("route-")) { go(a.slice(6)); return; }
-    if (a === "open-menu") { const layer=document.createElement("div"); layer.id="menu-root"; layer.innerHTML=sideMenu(); document.body.appendChild(layer); return; }
-    if (a === "close-menu") { document.getElementById("menu-root")?.remove(); return; }
+    if (a === "open-menu") {
+      if (document.getElementById("menu-root")) return;
+      const root = document.createElement("div");
+      root.id = "menu-root";
+      root.innerHTML = sideMenu();
+      document.body.appendChild(root);
+      document.querySelector('#menu-overlay .side-menu button[data-action="close-menu"]')?.focus();
+      return;
+    }
+    if (a === "close-menu") {
+      if (e.target.closest(".side-menu") && !e.target.closest('button[data-action="close-menu"]')) return;
+      document.getElementById("menu-root")?.remove();
+      return;
+    }
     if (a.startsWith("legal-")) { openLegal(a.slice(6)); return; }
     if (a === "sign-out") { await signOut(auth); return; }
     if (a === "create-menu") { openCreateMenu(); return; }
     if (a === "create-post") { closeModal(); openCreatePost(); return; }
     if (a === "create-moment") { closeModal(); openCreateMoment(); return; }
-    if (a === "submit-post") { const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=[]; for(const file of files) mediaIds.push(await uploadHomeMedia(file)); await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; closeModal(); toast("Post published.","success"); await loadHome(); paint(); return; }
+    if (a === "submit-post") { const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; closeModal(); toast("Post published.","success"); await loadHome(); paint(); return; }
     if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); const contentType=String(d.contentType || "text"); const needsPhoto=contentType === "photo" || contentType === "photo_text"; if(needsPhoto && !state.pendingMomentFile){toast("Choose a photo for this Moment.","error");return;} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentPhoto(state.pendingMomentFile); await api.createMoment({contentType,text:String(d.text || "").trim(),mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome(); paint(); return; }
     if (a === "post-menu") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Post options",`<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="edit-post" data-id="${esc(p.id)}">Edit post</button><button class="btn btn-secondary btn-block" type="button" data-action="delete-post" data-id="${esc(p.id)}">Delete post</button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`); return; }
     if (a === "edit-post") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Edit post",`<form id="edit-post-form" class="form-stack"><input type="hidden" name="postId" value="${esc(p.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(p.text || "")}</textarea><span>Post text</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${p.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${p.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${p.visibility === "private" ? "selected" : ""}>Private</option></select></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post">Save</button>`); return; }
@@ -680,7 +771,8 @@ document.addEventListener("click", async (e) => {
     if (a === "close-thread") { clearSubscriptions();state.activeThreadId=null;state.messages=[];go("chat");return; }
     if (a === "delete-message") { await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode:"for_everyone"});toast("Message deleted.","success");return; }
     if (a === "message-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); const profile=item?.result || item || {}; const derivedUsername = profile.username || String(item?.subtitle || "").replace(/^@/, ""); state.threadPeers[target]={uid:target,displayName:item?.title || profile.displayName || derivedUsername || "Conversation",username:derivedUsername,photoURL:profile.photoURL || null};saveThreadPeers(); const id=await findOrCreateDirectThread(target,state.threadPeers[target]); state.route="chat";state.activeThreadId=id;await loadThreads();paint();await loadMessages(id);return; }
-    if (a === "follow-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; await api.followUser({targetUid:target}); state.followingIds=[...new Set([...state.followingIds,String(target)])]; toast("Following.","success"); return; }
+    if (a === "view-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); await openPublicUserProfile(target,item || {}); return; }
+    if (a === "follow-user" || a === "unfollow-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const current=await api.getFollowState({targetUid:target}); if(current?.following){await api.unfollowUser({targetUid:target});state.followingIds=state.followingIds.filter((id)=>String(id)!==String(target));toast("No longer following.","success");}else{await api.followUser({targetUid:target});state.followingIds=[...new Set([...state.followingIds,String(target)])];toast("Following.","success");} paint(); return; }
     if (a === "skill-view" || a === "skill-search-view") { const s=state.skills.find((x)=>x.id===actionEl.dataset.id) || [...state.searchResults,...state.homeSearchResults].find((x)=>x.id===actionEl.dataset.id); if(s)openSkillListing(s.result || s);return; }
     if (a === "request-skill") { const listing=state.skills.find((x)=>x.id===actionEl.dataset.id) || [...state.searchResults,...state.homeSearchResults].map((x)=>x.result || x).find((x)=>x.id===actionEl.dataset.id); if(!listing)return; modal("Request this service",`<form id="skill-request-form" class="form-stack"><input type="hidden" name="listingId" value="${esc(listing.id)}"><label class="floating-field"><input name="title" value="Request: ${esc(listing.title || "service")}" maxlength="160" required placeholder=" "><span>Request title</span></label><label class="floating-field"><textarea name="description" maxlength="3000" required placeholder=" "></textarea><span>What do you need?</span></label><label class="floating-field"><input name="budgetMinMinor" type="number" min="0" placeholder=" "><span>Minimum budget (minor units)</span></label><label class="floating-field"><input name="budgetMaxMinor" type="number" min="0" placeholder=" "><span>Maximum budget (minor units)</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-skill-request">Send request</button>`,{wide:true});return; }
     if (a === "submit-skill-request") { const d=Object.fromEntries(new FormData(document.getElementById("skill-request-form"))); await api.createSkillRequest({title:String(d.title || "").trim(),description:String(d.description || "").trim(),listingId:d.listingId,currency:"NGN",budgetMinMinor:d.budgetMinMinor ? safeMinor(d.budgetMinMinor) : null,budgetMaxMinor:d.budgetMaxMinor ? safeMinor(d.budgetMaxMinor) : null}); closeModal();toast("Skill request sent.","success");return; }
@@ -714,7 +806,7 @@ document.addEventListener("click", async (e) => {
     if (a === "skill-onboarding-next") { const step=state.skillOnboardingStep;const f=document.getElementById("skill-details-form");if(f){const d=Object.fromEntries(new FormData(f));state.skillDraft={...state.skillDraft,...d};saveSkillDraft();} if(step===3){const d=state.skillDraft;const categories=String(d.category || "").trim();await api.upsertSkillProfile({headline:String(d.headline || "").trim(),bio:String(d.bio || "").trim(),locationText:String(d.locationText || "").trim(),remote:String(d.remote) !== "false",yearsExperience:Math.max(0,Math.min(80,Math.floor(Number(d.yearsExperience || 0)))),categories:categories ? [categories] : []}); if(d.listingTitle && d.listingDescription && d.category){await api.createSkillListing({title:String(d.listingTitle).trim(),description:String(d.listingDescription).trim(),categoryId:String(d.category),currency:String(d.currency || "NGN"),priceFromMinor:d.priceFromMinor === "" ? null : safeMinor(d.priceFromMinor),deliveryTimeDays:d.deliveryTimeDays === "" ? null : Math.max(1,Math.min(365,Math.floor(Number(d.deliveryTimeDays)))),tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean)});} state.skillDraft={...state.skillDraft,skillProfileUid:state.user.uid};saveSkillDraft();toast("Provider profile saved.","success");await loadSkillWorkspace();go("skill-profile");return;} state.skillOnboardingStep++;paint();return; }
     if (a === "skill-onboarding-back") { if(state.skillOnboardingStep>0){state.skillOnboardingStep--;paint();}return; }
     if (a === "submit-skill-listing") { const d=Object.fromEntries(new FormData(document.getElementById("skill-listing-form")));const id=actionEl.dataset.id;const payload={title:String(d.title || "").trim(),description:String(d.description || "").trim(),categoryId:String(d.categoryId || ""),currency:"NGN",priceFromMinor:d.priceFromMinor === "" ? null : safeMinor(d.priceFromMinor),deliveryTimeDays:d.deliveryTimeDays === "" ? null : Math.max(1,Math.min(365,Math.floor(Number(d.deliveryTimeDays)))),tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean)};if(id)await api.updateSkillListing({listingId:id,...payload});else await api.createSkillListing(payload);closeModal();toast(id ? "Listing updated." : "Listing published.","success");await loadSkillWorkspace();paint();return; }
-  } catch (err) { console.error(err?.code,err?.message); toast(friendlyError(err),"error"); }
+  } catch (err) { console.error("[Marvel Chat] action failed", a, err?.code, err?.message, err); toast(friendlyError(err),"error"); }
 });
 
 document.addEventListener("change", (e) => {
