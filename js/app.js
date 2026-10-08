@@ -14,7 +14,7 @@ import {
 } from "./ui.js";
 import {icon} from "./icons.js";
 import {
-  uploadHomePhoto, uploadHomeMedia, uploadHomeMediaFiles, readPostMedia, uploadMomentPhoto, readMomentMedia, validateHomeFiles
+  uploadHomePhoto, uploadHomeMedia, uploadHomeMediaFiles, readPostMedia, uploadMomentPhoto, readMomentMedia, validateHomeFiles, prepareMediaFile
 } from "./media.js";
 
 const app = document.getElementById("app");
@@ -61,10 +61,10 @@ function authField(type, label, name, opts = {}) {
 }
 
 function legalLinks() {
-  return `<p class="legal-copy">By creating an account, we agree to the
+  return `<p class="legal-copy">Read the
     <button class="inline-link" type="button" data-action="legal-terms">Terms</button>,
     <button class="inline-link" type="button" data-action="legal-privacy">Privacy Policy</button>, and
-    <button class="inline-link" type="button" data-action="legal-community">Community Guidelines</button>.</p>`;
+    <button class="inline-link" type="button" data-action="legal-community">Community Guidelines</button> before creating your account.</p>`;
 }
 
 function authScreen() {
@@ -87,7 +87,7 @@ function authScreen() {
         ${authField("text", "Username", "username", {autocomplete: "username", maxlength: 30})}
         ${authField("email", "Email", "email", {autocomplete: "email", maxlength: 254})}
         ${authField("password", "Password", "password", {autocomplete: "new-password", minlength: 6, maxlength: 128, password: true})}
-        <label class="agree-row"><input type="checkbox" name="agreement" required><span>I agree to the Marvel Chat terms and community standards.</span></label>
+        <label class="agree-row"><input type="checkbox" name="agreement" required><span>I agree to the Terms, Privacy Policy and Community Guidelines.</span></label>
         ${legalLinks()}
         <button class="btn btn-primary btn-block btn-lg" type="submit">Create account</button>
       </form>
@@ -278,6 +278,7 @@ async function loadProfile() {
   state.profile.displayName = state.profile.displayName || state.user.displayName || "";
   state.profile.email = state.profile.email || state.user.email || "";
   state.profile.photoURL = state.profile.photoURL || state.user.photoURL || "";
+  state.profile.initial = String(state.profile.displayName || state.profile.username || state.user.displayName || state.user.email || "U").trim().charAt(0).toUpperCase() || "U";
   try {
     const f = await api.getFollowList({targetUid: state.user.uid, direction: "following", limit: 50});
     state.followingIds = Array.isArray(f?.users) ? f.users.map((u) => String(u.uid)) : [];
@@ -589,8 +590,16 @@ async function disableBrowserNotifications() {
 }
 
 function openLegal(type) {
-  const title = {terms:"Terms",privacy:"Privacy Policy",community:"Community Guidelines"}[type];
-  modal(title, legalBody(type), `<button class="btn btn-primary" type="button" data-action="close-modal">Done</button>`, {wide:true});
+  const routes = {
+    terms: "./terms.html",
+    privacy: "./privacy.html",
+    community: "./community-guidelines.html",
+  };
+  const target = routes[type];
+  if (!target) return;
+  document.getElementById("menu-root")?.remove();
+  closeModal();
+  window.location.assign(target);
 }
 
 const viewMap = {
@@ -652,7 +661,7 @@ function openCreatePost() {
 
 function openCreateMoment() {
   state.pendingMomentFile = null;
-  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo</option><option value="photo_text">Photo + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add a photo</strong><small>Required for photo/photo + text Moments · photo optimized automatically · 2 MiB daily allowance</small></span><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
+  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo or video</option><option value="photo_text">Photo/video + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add a photo or video</strong><small>One media item · optimized automatically · included in your 2 MiB daily allowance</small></span><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime"></label><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
 }
 
 function openComment(postId) {
@@ -730,7 +739,7 @@ document.addEventListener("click", async (e) => {
       }
       return;
     }
-    if (a.startsWith("route-")) { go(a.slice(6)); return; }
+    if (a.startsWith("route-")) { document.getElementById("menu-root")?.remove(); go(a.slice(6)); return; }
     if (a === "open-menu") {
       if (document.getElementById("menu-root")) return;
       const root = document.createElement("div");
@@ -751,7 +760,7 @@ document.addEventListener("click", async (e) => {
     if (a === "create-post") { closeModal(); openCreatePost(); return; }
     if (a === "create-moment") { closeModal(); openCreateMoment(); return; }
     if (a === "submit-post") { const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; closeModal(); toast("Post published.","success"); await loadHome(); paint(); return; }
-    if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); const contentType=String(d.contentType || "text"); const needsPhoto=contentType === "photo" || contentType === "photo_text"; if(needsPhoto && !state.pendingMomentFile){toast("Choose a photo for this Moment.","error");return;} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentPhoto(state.pendingMomentFile); await api.createMoment({contentType,text:String(d.text || "").trim(),mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome(); paint(); return; }
+    if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); const contentType=String(d.contentType || "text"); const needsPhoto=contentType === "photo" || contentType === "photo_text"; if(needsPhoto && !state.pendingMomentFile){toast("Choose a photo or video for this Moment.","error");return;} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentPhoto(state.pendingMomentFile); await api.createMoment({contentType,text:String(d.text || "").trim(),mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome(); paint(); return; }
     if (a === "post-menu") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Post options",`<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="edit-post" data-id="${esc(p.id)}">Edit post</button><button class="btn btn-secondary btn-block" type="button" data-action="delete-post" data-id="${esc(p.id)}">Delete post</button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`); return; }
     if (a === "edit-post") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Edit post",`<form id="edit-post-form" class="form-stack"><input type="hidden" name="postId" value="${esc(p.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(p.text || "")}</textarea><span>Post text</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${p.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${p.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${p.visibility === "private" ? "selected" : ""}>Private</option></select></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post">Save</button>`); return; }
     if (a === "submit-edit-post") { const d=Object.fromEntries(new FormData(document.getElementById("edit-post-form"))); await api.updatePost({postId:d.postId,text:String(d.text || "").trim(),visibility:d.visibility}); closeModal(); toast("Post updated.","success"); await loadHome(); paint(); return; }
@@ -761,6 +770,23 @@ document.addEventListener("click", async (e) => {
     if (a === "comment-post") { openComment(actionEl.dataset.id); return; }
     if (a === "submit-comment") { const d=Object.fromEntries(new FormData(document.getElementById("comment-form"))); await api.commentOnPost({postId:d.postId,text:String(d.text || "").trim()}); closeModal(); toast("Comment added.","success"); return; }
     if (a === "share-post") { const url=location.href; try { if(navigator.share) await navigator.share({title:"Marvel Chat",text:"Check this post on Marvel Chat",url}); else {await navigator.clipboard.writeText(url);toast("Link copied.","success");} } catch {} return; }
+    if (a === "remove-pending-media") {
+      const index = Math.max(0, Number(actionEl.dataset.index || 0));
+      if (Array.isArray(state.pendingMediaFiles)) state.pendingMediaFiles.splice(index, 1);
+      const input = document.getElementById("post-media");
+      if (input) input.value = "";
+      const box = document.getElementById("post-media-preview");
+      if (box) box.innerHTML = state.pendingMediaFiles.map((file,i) => `<div class="selected-media"><span>${file.type.startsWith("video/") ? icon("video",17) : icon("camera",17)}</span><div class="grow"><strong>${esc(file.name)}</strong><small>${(file.size / 1024 / 1024).toFixed(2)} MiB · optimized before upload</small></div><button class="icon-btn" type="button" data-action="remove-pending-media" data-index="${i}" aria-label="Remove ${esc(file.name)}">${icon("close",17)}</button></div>`).join("");
+      return;
+    }
+    if (a === "remove-pending-moment") {
+      state.pendingMomentFile = null;
+      const input = document.getElementById("moment-photo");
+      if (input) input.value = "";
+      const box = document.getElementById("moment-photo-preview");
+      if (box) box.innerHTML = "";
+      return;
+    }
     if (a === "load-post-media") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(p) await hydratePostMedia(p); return; }
     if (a === "view-moment") { const m=state.moments.find((x)=>x.id===actionEl.dataset.id); if(!m)return; let urls=[]; if(m.mediaId) { try { urls=await readMomentMedia(m.id,[m.mediaId]); } catch {} } modal(m.uid === state.user.uid ? "Your Moment" : "Moment",`<div class="moment-view"><div class="moment-large-avatar">${avatar(m.author || m,"xl",true)}</div><span class="eyebrow">${esc(m.contentType || "text")}</span><h3>${esc(m.authorSnapshot?.displayName || m.author?.displayName || m.displayName || m.username || "")}</h3>${urls[0]?.url ? `<img class="moment-view-image" src="${esc(urls[0].url)}" alt="Moment photo" loading="lazy">` : ""}<p>${esc(m.text || "")}</p><small>${formatDate(m.createdAt)}</small></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Done</button>${m.uid === state.user.uid || m.authorUid === state.user.uid ? `<button class="btn btn-primary" type="button" data-action="delete-moment" data-id="${esc(m.id)}">Delete</button>` : ""}`); return; }
     if (a === "delete-moment") { await api.deleteMoment({momentId:actionEl.dataset.id}); closeModal(); toast("Moment deleted.","success"); await loadHome(); paint(); return; }
@@ -809,23 +835,61 @@ document.addEventListener("click", async (e) => {
   } catch (err) { console.error("[Marvel Chat] action failed", a, err?.code, err?.message, err); toast(friendlyError(err),"error"); }
 });
 
-document.addEventListener("change", (e) => {
+let mediaSelectionToken = 0;
+
+document.addEventListener("change", async (e) => {
   const input = e.target;
+
   if (input?.id === "post-media" && input.files) {
+    const token = ++mediaSelectionToken;
     try {
       const files = validateHomeFiles(input.files);
-      state.pendingMediaFiles = files;
+      state.pendingMediaFiles = [];
       const box = document.getElementById("post-media-preview");
+      if (box) box.innerHTML = `<div class="media-optimizing">Optimizing selected media…</div>`;
+
+      const prepared = [];
+      for (const file of files) {
+        const optimized = await prepareMediaFile(file);
+        if (token !== mediaSelectionToken) return;
+        prepared.push(optimized);
+      }
+
+      state.pendingMediaFiles = prepared;
       if (box) {
-        box.innerHTML = files.map((file) => `<div class="selected-media"><span>${file.type.startsWith("video/") ? icon("video",17) : icon("camera",17)}</span><div><strong>${esc(file.name)}</strong><small>${(file.size / 1024 / 1024).toFixed(2)} MiB</small></div></div>`).join("");
+        box.innerHTML = prepared.map((file,index) => `<div class="selected-media"><span>${file.type.startsWith("video/") ? icon("video",17) : icon("camera",17)}</span><div class="grow"><strong>${esc(file.name)}</strong><small>${(file.size / 1024 / 1024).toFixed(2)} MiB · optimized and ready</small></div><button class="icon-btn" type="button" data-action="remove-pending-media" data-index="${index}" aria-label="Remove ${esc(file.name)}">${icon("close",17)}</button></div>`).join("");
       }
     } catch (error) {
       state.pendingMediaFiles = [];
       input.value = "";
+      const box = document.getElementById("post-media-preview");
+      if (box) box.innerHTML = "";
       toast(error.message,"error");
     }
   }
-  if(input?.id === "moment-photo" && input.files?.[0]) { state.pendingMomentFile=input.files[0]; const box=document.getElementById("moment-photo-preview"); if(box){box.innerHTML=`<img src="${URL.createObjectURL(input.files[0])}" alt="Selected Moment preview">`; } }
+
+  if(input?.id === "moment-photo" && input.files?.[0]) {
+    const token = ++mediaSelectionToken;
+    const source = input.files[0];
+    const box = document.getElementById("moment-photo-preview");
+    try {
+      if (box) box.innerHTML = `<div class="media-optimizing">Optimizing media…</div>`;
+      const optimized = await prepareMediaFile(source, undefined, "image or video");
+      if (token !== mediaSelectionToken) return;
+      state.pendingMomentFile = optimized;
+      if (box) {
+        const url = URL.createObjectURL(optimized);
+        box.innerHTML = optimized.type.startsWith("video/")
+          ? `<video src="${url}" controls playsinline preload="metadata"></video><button class="btn btn-secondary" type="button" data-action="remove-pending-moment">Remove</button><small class="muted">${(optimized.size / 1024 / 1024).toFixed(2)} MiB · optimized and ready</small>`
+          : `<img src="${url}" alt="Selected Moment preview"><button class="btn btn-secondary" type="button" data-action="remove-pending-moment">Remove</button><small class="muted">${(optimized.size / 1024 / 1024).toFixed(2)} MiB · optimized and ready</small>`;
+      }
+    } catch (error) {
+      state.pendingMomentFile = null;
+      input.value = "";
+      if (box) box.innerHTML = "";
+      toast(error.message,"error");
+    }
+  }
 });
 
 document.addEventListener("submit", async (e) => {

@@ -23,7 +23,10 @@ export const ALLOWED_MOMENT_MEDIA_TYPES = new Set([
   "image/jpeg",
   "image/png",
   "image/webp",
-  "image/gif"
+  "image/gif",
+  "video/mp4",
+  "video/webm",
+  "video/quicktime"
 ]);
 
 function ensureFile(file, allowedTypes, label) {

@@ -24,7 +24,7 @@ import {
   limit,
   onSnapshot
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
-import {getFunctions, httpsCallable} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js";
+import {getFunctions, httpsCallable, httpsCallableFromURL} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js";
 import {
   initializeAppCheck,
   ReCaptchaEnterpriseProvider,
@@ -108,4 +108,5 @@ export {
   limit,
   onSnapshot,
   httpsCallable,
+  httpsCallableFromURL,
 };

@@ -1,4 +1,5 @@
-import {httpsCallable, appCheckReady} from "./firebase.js";
+import {functions, httpsCallableFromURL, appCheckReady} from "./firebase.js";
+import {appMeta} from "./config.js";
 
 const names = [
   "getPlatformStatus", "ensureUserProfile", "updateProfile", "updateUserSettings",
@@ -17,7 +18,20 @@ const names = [
   "followUser", "unfollowUser", "getFollowState", "getFollowList"
 ];
 
-const fns = Object.fromEntries(names.map((name) => [name, httpsCallable(name)]));
+function callableUrl(name) {
+  return `https://${appMeta.region}-${appMeta.projectId}.cloudfunctions.net/${name}`;
+}
+
+const fns = Object.fromEntries(
+    names.map((name) => [
+      name,
+      httpsCallableFromURL(
+          functions,
+          callableUrl(name),
+          {timeout: 70000},
+      ),
+    ]),
+);
 
 export async function call(name, data = {}) {
   if (!fns[name]) throw new Error(`Unknown operation: ${name}`);
