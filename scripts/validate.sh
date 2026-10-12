@@ -40,6 +40,12 @@ forbidden = {"dispatchNotificationPush"}
 names = {x.strip().strip("\"") for x in chunk.split(",") if x.strip()}
 assert not (names & forbidden), "Trigger was incorrectly added to callable frontend catalog."
 assert "6LcYItwtAAAAAFWkMn7GYro06LuG3VMR1K0U1Xgb" in Path("js/config.js").read_text()
+for name in ("getPublicProfiles", "submitFeedback"):
+  assert f'"{name}"' in chunk, f"Missing required live callable {name}"
+app = Path("js/app.js").read_text()
+assert 'scope:"home"' in app, "Home search must be People + Posts only"
+assert "startAfter(state.postsCursor)" in app, "Cursor pagination must be present"
+assert 'window.location.assign(target)' not in app, "Legal navigation must not reload the app"
 print("CALLABLE_CATALOG_CHECK=PASS")
 print("APP_CHECK_CONFIG_CHECK=PASS")
 PY3

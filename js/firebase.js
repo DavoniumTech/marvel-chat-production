@@ -22,6 +22,7 @@ import {
   where,
   orderBy,
   limit,
+  startAfter,
   onSnapshot
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
 import {getFunctions, httpsCallable, httpsCallableFromURL} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js";
@@ -58,7 +59,12 @@ export function initAppCheck() {
 initAppCheck();
 
 export const auth = getAuth(firebaseApp);
-void setPersistence(auth, browserLocalPersistence).catch(() => {});
+export const authPersistenceReady = setPersistence(auth, browserLocalPersistence)
+  .then(() => true)
+  .catch((error) => {
+    console.warn("[Marvel Chat] Browser persistence could not be configured.", error?.code || "unknown");
+    return false;
+  });
 export const db = getFirestore(firebaseApp);
 export const functions = getFunctions(firebaseApp, "europe-west1");
 
@@ -106,6 +112,7 @@ export {
   where,
   orderBy,
   limit,
+  startAfter,
   onSnapshot,
   httpsCallable,
   httpsCallableFromURL,

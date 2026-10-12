@@ -1,8 +1,8 @@
 import {
-  auth, db, onAuthStateChanged, createUserWithEmailAndPassword,
+  auth, db, onAuthStateChanged, authPersistenceReady, createUserWithEmailAndPassword,
   signInWithEmailAndPassword, signOut, sendPasswordResetEmail,
   GoogleAuthProvider, signInWithPopup, updateAuthProfile, initAppCheck,
-  collection, doc, getDoc, getDocs, query, where, orderBy, limit, onSnapshot, getBrowserFcmToken, onForegroundMessage
+  collection, doc, getDoc, getDocs, query, where, orderBy, limit, startAfter, onSnapshot, getBrowserFcmToken, onForegroundMessage
 } from "./firebase.js";
 import {api} from "./api.js";
 import {
@@ -20,7 +20,7 @@ import {
 const app = document.getElementById("app");
 const routes = [
   "home", "chat", "skills", "market", "profile", "search",
-  "notifications", "settings", "skill-profile", "business",
+  "notifications", "settings", "feedback", "legal", "skill-profile", "business",
   "seller-onboarding", "skill-onboarding"
 ];
 const MARKET_CATEGORIES = [
@@ -147,13 +147,13 @@ function sideMenu() {
         <button class="icon-btn" type="button" data-action="close-menu" aria-label="Close menu">${icon("close",20)}</button>
       </div>
       <button class="menu-item" type="button" data-action="route-search">${icon("search")}Search</button>
-      <button class="menu-item" type="button" data-action="route-notifications">${icon("bell")}Notifications</button>
+      <button class="menu-item" type="button" data-action="route-notifications">${icon("bell")}Notifications${state.unreadNotifications ? ` <span class="menu-unread">${state.unreadNotifications > 9 ? "9+" : state.unreadNotifications}</span>` : ""}</button>
       <button class="menu-item" type="button" data-action="route-settings">${icon("settings")}Settings</button>
-      <div class="menu-sep"></div>
       <button class="menu-item" type="button" data-action="legal-terms">${icon("file")}Terms</button>
       <button class="menu-item" type="button" data-action="legal-privacy">${icon("lock")}Privacy</button>
       <button class="menu-item" type="button" data-action="legal-community">${icon("shield")}Community Guidelines</button>
-      <div class="menu-foot">Davonium Technologies · © 2026</div>
+      <button class="menu-item" type="button" data-action="route-feedback">${icon("message")}Feedback</button>
+      <div class="menu-bottom"><button class="menu-item menu-signout" type="button" data-action="sign-out">${icon("logout")}Sign out</button><div class="menu-foot">Davonium Technologies · © 2026</div></div>
     </aside>
   </div>`;
 }
@@ -266,52 +266,136 @@ function contextualSearch(formId, placeholder, scope, value = "") {
   return `<form id="${esc(formId)}" class="context-search"><div class="context-search-box">${icon("search",18)}<input name="query" value="${esc(value)}" maxlength="80" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}" autocomplete="off"><button type="submit" aria-label="Search">${icon("arrow",18)}</button></div><input type="hidden" name="scope" value="${esc(scope)}"></form>`;
 }
 
-async function loadProfile() {
-  let snap = await getDoc(doc(db, "users", state.user.uid));
+async function loadProfile(user = state.user) {
+  const uid = user?.uid;
+  if (!uid) return;
+  let snap = await getDoc(doc(db, "users", uid));
+  if (!state.user || state.user.uid !== uid) return;
   if (!snap.exists()) {
     await api.ensureUserProfile();
-    snap = await getDoc(doc(db, "users", state.user.uid));
+    if (!state.user || state.user.uid !== uid) return;
+    snap = await getDoc(doc(db, "users", uid));
   }
+  if (!state.user || state.user.uid !== uid) return;
   state.profile = snap.exists()
-    ? {uid: state.user.uid, ...snap.data()}
-    : {uid: state.user.uid, email: state.user.email || ""};
-  state.profile.displayName = state.profile.displayName || state.user.displayName || "";
-  state.profile.email = state.profile.email || state.user.email || "";
-  state.profile.photoURL = state.profile.photoURL || state.user.photoURL || "";
-  state.profile.initial = String(state.profile.displayName || state.profile.username || state.user.displayName || state.user.email || "U").trim().charAt(0).toUpperCase() || "U";
-  try {
-    const f = await api.getFollowList({targetUid: state.user.uid, direction: "following", limit: 50});
-    state.followingIds = Array.isArray(f?.users) ? f.users.map((u) => String(u.uid)) : [];
-  } catch {
-    state.followingIds = [];
-  }
-  try {
-    const stats = await api.getFollowState({targetUid: state.user.uid});
-    state.followStats = {
-      followersCount: Number(stats?.followersCount || 0),
-      followingCount: Number(stats?.followingCount || 0)
-    };
-  } catch {}
+    ? {uid, ...snap.data()}
+    : {uid, email: user.email || ""};
+  state.profile.displayName = state.profile.displayName || user.displayName || "";
+  state.profile.email = state.profile.email || user.email || "";
+  state.profile.photoURL = state.profile.photoURL || user.photoURL || "";
+  state.profile.initial = String(state.profile.displayName || state.profile.username || user.displayName || user.email || "U").trim().charAt(0).toUpperCase() || "U";
 }
 
-async function loadHome() {
-  const [ps, ms] = await Promise.all([
-    getDocs(query(collection(db,"posts"), where("visibility","==","public"), where("status","==","active"), orderBy("createdAt","desc"), limit(20))),
-    getDocs(query(collection(db,"moments"), where("visibility","==","public"), where("status","==","active"), orderBy("createdAt","desc"), limit(40)))
+async function loadFollowSummary() {
+  if (!state.user) return;
+  const uid = state.user.uid;
+  const [followingResult, statsResult] = await Promise.allSettled([
+    api.getFollowList({targetUid: uid, direction: "following", limit: 50}),
+    api.getFollowState({targetUid: uid})
   ]);
-  state.posts = ps.docs.map((d) => ({id:d.id,...d.data()}));
-  const now = Date.now();
-  const active = ms.docs.map((d) => ({id:d.id,...d.data()})).filter((x) => !x.expiresAt || stamp(x.expiresAt) > now);
-  const own = active.filter((x) => uidOf(x) === state.user.uid || x.uid === state.user.uid).slice(0,1);
-  const latest = active.filter((x) => !own.some((o) => o.id === x.id)).slice(0,12);
-  state.moments = [...own, ...latest];
-
-  state.posts.filter((p) => Array.isArray(p.mediaIds) && p.mediaIds.length).slice(0,4).forEach((p) => {
-    p.mediaUrls = null;
-    void hydratePostMedia(p);
-  });
+  if (!state.user || state.user.uid !== uid) return;
+  if (followingResult.status === "fulfilled") {
+    state.followingIds = Array.isArray(followingResult.value?.users)
+      ? followingResult.value.users.map((u) => String(u.uid)) : [];
+  }
+  if (statsResult.status === "fulfilled") {
+    state.followStats = {
+      followersCount: Number(statsResult.value?.followersCount || 0),
+      followingCount: Number(statsResult.value?.followingCount || 0)
+    };
+  }
+  if (state.route === "home" || state.route === "profile") paint();
 }
 
+async function refreshUnreadCount() {
+  if (!state.user) return;
+  const uid = state.user.uid;
+  try {
+    const result = await api.getMyNotificationSummary();
+    if (!state.user || state.user.uid !== uid) return;
+    state.unreadNotifications = Math.max(0, Number(result?.unreadCount || 0));
+    paint();
+  } catch (error) {
+    // Keep the badge unavailable rather than blocking startup on an optional summary.
+    console.debug("[Marvel Chat] Unread summary unavailable", error?.code || "unknown");
+  }
+}
+
+const HOME_PAGE_SIZE = 10;
+const HOME_CACHE_MS = 60 * 1000;
+
+async function loadHome({force = false} = {}) {
+  if (!state.user || state.homeLoading) return;
+  const fresh = state.homeLoadedAt && (Date.now() - state.homeLoadedAt < HOME_CACHE_MS);
+  if (!force && fresh) return;
+
+  state.homeLoading = true;
+  try {
+    const [ps, ms] = await Promise.all([
+      getDocs(query(collection(db,"posts"), where("visibility","==","public"), where("status","==","active"), orderBy("createdAt","desc"), limit(HOME_PAGE_SIZE))),
+      getDocs(query(collection(db,"moments"), where("visibility","==","public"), where("status","==","active"), orderBy("createdAt","desc"), limit(15)))
+    ]);
+    state.posts = ps.docs.map((d) => ({id:d.id,...d.data()}));
+    state.postsCursor = ps.docs.length ? ps.docs[ps.docs.length - 1] : null;
+    state.hasMorePosts = ps.docs.length === HOME_PAGE_SIZE;
+    const now = Date.now();
+    const active = ms.docs.map((d) => ({id:d.id,...d.data()})).filter((x) => !x.expiresAt || stamp(x.expiresAt) > now);
+    const own = active.filter((x) => uidOf(x) === state.user.uid || x.uid === state.user.uid).slice(0,1);
+    const latest = active.filter((x) => !own.some((o) => o.id === x.id)).slice(0,12);
+    state.moments = [...own, ...latest];
+    state.homeLoadedAt = Date.now();
+    state.posts.filter((p) => Array.isArray(p.mediaIds) && p.mediaIds.length).slice(0,3).forEach((p) => {
+      p.mediaUrls = null;
+      void hydratePostMedia(p);
+    });
+  } finally {
+    state.homeLoading = false;
+  }
+}
+
+async function loadMorePosts() {
+  if (!state.user || !state.hasMorePosts || state.isLoadingMorePosts || !state.postsCursor) return;
+  state.isLoadingMorePosts = true;
+  paint();
+  try {
+    const snapshot = await getDocs(query(
+      collection(db,"posts"),
+      where("visibility","==","public"),
+      where("status","==","active"),
+      orderBy("createdAt","desc"),
+      startAfter(state.postsCursor),
+      limit(HOME_PAGE_SIZE)
+    ));
+    const known = new Set(state.posts.map((p) => p.id));
+    const more = snapshot.docs.map((d) => ({id:d.id,...d.data()})).filter((p) => !known.has(p.id));
+    state.posts.push(...more);
+    state.postsCursor = snapshot.docs.length ? snapshot.docs[snapshot.docs.length - 1] : state.postsCursor;
+    state.hasMorePosts = snapshot.docs.length === HOME_PAGE_SIZE;
+    more.filter((p) => Array.isArray(p.mediaIds) && p.mediaIds.length).slice(0,3).forEach((p) => {
+      p.mediaUrls = null;
+      void hydratePostMedia(p);
+    });
+  } catch (error) {
+    toast(friendlyError(error), "error");
+    state.hasMorePosts = false;
+  } finally {
+    state.isLoadingMorePosts = false;
+    paint();
+  }
+}
+
+function setupFeedPagination() {
+  if (state.feedObserver) {
+    state.feedObserver.disconnect();
+    state.feedObserver = null;
+  }
+  const sentinel = document.getElementById("home-feed-pagination");
+  if (!sentinel || state.route !== "home" || !state.hasMorePosts || !("IntersectionObserver" in window)) return;
+  state.feedObserver = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) void loadMorePosts();
+  }, {root: document.querySelector(".main-scroll"), rootMargin: "320px 0px"});
+  state.feedObserver.observe(sentinel);
+}
 async function hydratePostMedia(post) {
   if (!post?.id || !Array.isArray(post.mediaIds) || !post.mediaIds.length || Array.isArray(post.mediaUrls)) return;
   try { post.mediaUrls = await readPostMedia(post.id, post.mediaIds); } catch { post.mediaUrls = []; }
@@ -321,6 +405,19 @@ async function hydratePostMedia(post) {
 async function loadThreads() {
   const s = await getDocs(query(collection(db,"chatThreads"), where("participantIds","array-contains",state.user.uid), limit(50)));
   state.threads = s.docs.map((d) => ({id:d.id,...d.data()})).sort((a,b) => stamp(b.updatedAt || b.lastMessageAt) - stamp(a.updatedAt || a.lastMessageAt));
+  const peerIds = [...new Set(state.threads.flatMap((thread) => participants(thread).map(String).filter((uid) => uid && uid !== state.user.uid)))];
+  const missing = peerIds.filter((uid) => !state.threadPeers?.[uid] || (!state.threadPeers[uid].displayName && !state.threadPeers[uid].username));
+  if (missing.length) {
+    try {
+      const response = await api.getPublicProfiles({userIds: missing.slice(0,25)});
+      for (const profile of (response?.profiles || [])) {
+        if (profile?.uid) state.threadPeers[profile.uid] = profile;
+      }
+      saveThreadPeers();
+    } catch (error) {
+      console.debug("[Marvel Chat] Peer identity refresh unavailable", error?.code || "unknown");
+    }
+  }
 }
 
 async function findOrCreateDirectThread(targetUid, profile) {
@@ -431,23 +528,24 @@ function renderHome() {
   const post = (p) => {
     const author = p.authorSnapshot || p.author || p;
     const urls = Array.isArray(p.mediaUrls) ? p.mediaUrls : [];
-    const mediaHtml = urls.length ? `<div class="post-media-grid ${urls.length > 1 ? "multi" : ""}">${urls.map((m) => {
-      if (String(m.contentType || "").startsWith("video/")) {
-        return `<figure><video src="${esc(m.url)}" controls playsinline preload="metadata"></video></figure>`;
-      }
-      return `<figure><img src="${esc(m.url)}" alt="Photo shared by ${esc(author.displayName || "a community member")}" loading="lazy" decoding="async"></figure>`;
-    }).join("")}</div>` : (Array.isArray(p.mediaIds) && p.mediaIds.length ? `<button class="media-placeholder" type="button" data-action="load-post-media" data-id="${esc(p.id)}">${icon("camera",17)}<span>Load ${p.mediaIds.length > 1 ? `${p.mediaIds.length} media items` : "media"}</span></button>` : "");
+    const carouselIndex = urls.length ? Math.min(Math.max(0, Number(state.postCarouselIndex?.[p.id] || 0)), urls.length - 1) : 0;
+    const activeMedia = urls[carouselIndex];
+    const mediaHtml = urls.length ? `<div class="post-media-carousel" data-post-carousel="${esc(p.id)}"><figure class="post-media-frame">${String(activeMedia?.contentType || "").startsWith("video/") ? `<video src="${esc(activeMedia.url)}" controls playsinline preload="metadata"></video>` : `<img src="${esc(activeMedia?.url || "")}" alt="Photo ${carouselIndex + 1} shared by ${esc(author.displayName || "a community member")}" loading="lazy" decoding="async">`}</figure>${urls.length > 1 ? `<div class="post-media-controls"><button type="button" data-action="post-media-prev" data-id="${esc(p.id)}" aria-label="Previous media">${icon("back",17)}</button><span>${carouselIndex + 1} / ${urls.length}</span><button type="button" data-action="post-media-next" data-id="${esc(p.id)}" aria-label="Next media">${icon("arrow",17)}</button></div>` : ""}</div>` : (Array.isArray(p.mediaIds) && p.mediaIds.length ? `<button class="media-placeholder" type="button" data-action="load-post-media" data-id="${esc(p.id)}">${icon("camera",17)}<span>Load ${p.mediaIds.length > 1 ? `${p.mediaIds.length} media items` : "media"}</span></button>` : "");
+    const collapseAt = urls.length ? 180 : 520;
+    const collapsible = String(p.text || "").length > collapseAt;
+    const expanded = Boolean(state.captionExpanded?.[p.id]);
+    const captionClass = urls.length ? "caption-collapsed-media" : "caption-collapsed-text";
     return `<article class="post-card modern-post" data-post-id="${esc(p.id)}">
       <header class="post-head">${avatar(author,"md",true)}<div class="grow"><strong>${esc(author.displayName || "Community member")}</strong><span>${esc(author.username ? `@${author.username}` : "Community")} · ${when(p.createdAt)}</span></div>${uidOf(p) === state.user.uid ? `<button class="icon-btn" type="button" data-action="post-menu" data-id="${esc(p.id)}" aria-label="Post options">${icon("menuDots",19)}</button>` : `<button class="post-follow" type="button" data-action="${state.followingIds.includes(String(uidOf(p))) ? "unfollow-user" : "follow-user"}" data-id="${esc(uidOf(p))}" aria-label="${followLabel(uidOf(p))}">${followLabel(uidOf(p))}</button>`}</header>
-      <div class="post-body">${p.text ? `<p>${esc(p.text)}</p>` : ""}${mediaHtml}</div>
+      <div class="post-body">${mediaHtml}${p.text ? `<div class="post-caption"><p class="caption-text ${collapsible ? (expanded ? "caption-expanded" : captionClass) : ""}" data-caption-id="${esc(p.id)}">${esc(p.text)}</p>${collapsible ? `<button class="caption-toggle" type="button" data-action="toggle-caption" data-id="${esc(p.id)}">${expanded ? "Show less" : "Show more"}</button>` : ""}</div>` : ""}</div>
       <footer class="post-actions"><button type="button" data-action="like-post" data-id="${esc(p.id)}">${icon("heart",18)}Like <span>${Number(p.reactionCount || 0) || ""}</span></button><button type="button" data-action="comment-post" data-id="${esc(p.id)}">${icon("comment",18)}Comment <span>${Number(p.commentCount || 0) || ""}</span></button><button type="button" data-action="save-post" data-id="${esc(p.id)}">${icon("bookmark",18)}Save</button><button type="button" data-action="share-post" data-id="${esc(p.id)}">${icon("arrow",18)}Share</button></footer>
     </article>`;
   };
   return `<section class="screen home-screen">
     <section class="home-moments"><div class="section-head compact"><div><span class="eyebrow">MOMENTS</span><h2>Stories & updates</h2></div><button class="text-button" type="button" data-action="create-moment">Create</button></div><div class="moments-row">${own ? momentCard(own,true) : `<button class="moment-card own" type="button" data-action="create-moment"><div class="moment-ring add-ring">${avatar(state.profile || state.user,"md",true)}<span class="add-badge">${icon("plus",13)}</span></div><span class="moment-label">Add a Moment</span></button>`}${following.map((m) => momentCard(m)).join("")}</div></section>
-    ${contextualSearch("home-search-form","Search people, skills, products, or shops…","all",state.searchQuery)}
+    ${contextualSearch("home-search-form","Search people and posts…","home",state.searchQuery)}
     ${state.homeSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">SEARCH</span><h2>Matches</h2></div><button class="text-button" type="button" data-action="clear-home-search">Clear</button></div><div class="results">${state.homeSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}
-    <section class="section feed-section"><div class="section-head compact"><div><span class="eyebrow">COMMUNITY FEED</span><h2>Latest updates</h2></div></div>${state.posts.length ? state.posts.map(post).join("") : emptyState("Your feed is quiet","Community updates will appear here.","create-post","Create a post")}</section>
+    <section class="section feed-section"><div class="section-head compact"><div><span class="eyebrow">COMMUNITY FEED</span><h2>Latest updates</h2><small class="muted">People and public posts</small></div></div>${state.posts.length ? state.posts.map(post).join("") : emptyState("Your feed is quiet","Community updates will appear here.","create-post","Create a post")}<div id="home-feed-pagination" class="feed-pagination">${state.isLoadingMorePosts ? `<span class="feed-spinner" aria-hidden="true"></span><span>Loading more posts…</span>` : state.hasMorePosts ? `<span>Scroll to load more posts</span><button class="text-button" type="button" data-action="load-more-posts">Load more</button>` : `<span>${state.posts.length ? "You are all caught up." : ""}</span>`}</div></section>
     <button class="fab" type="button" data-action="create-menu" aria-label="Create"><span>${icon("plus",23)}</span></button>
   </section>`;
 }
@@ -536,8 +634,16 @@ function renderSearch() {
   return `<section class="screen">${head("DISCOVERY","Search","Find people, skills, products, and shops.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search everything…" autocomplete="off"></label><select name="scope"><option value="all" ${state.searchScope === "all" ? "selected" : ""}>Everything</option><option value="users" ${state.searchScope === "users" ? "selected" : ""}>People</option><option value="skills" ${state.searchScope === "skills" ? "selected" : ""}>Skills</option><option value="market" ${state.searchScope === "market" ? "selected" : ""}>Market</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching","Search by name, username, skill, product, or shop.")}</div></section>`;
 }
 function renderNotifications() { return `<section class="screen">${head("UPDATES","Notifications",state.unreadNotifications ? `${state.unreadNotifications} unread` : "You are all caught up.", "", "", "home")}<div>${state.notifications.length ? state.notifications.map((n) => `<article class="notification ${n.read || n.isRead || n.readAt ? "" : "unread"}"><div class="notification-icon">${icon("bell",18)}</div><div class="grow"><strong>${esc(n.title || "Marvel Chat")}</strong><p>${esc(n.body || "")}</p><small>${when(n.createdAt)}</small></div>${!(n.read || n.isRead || n.readAt) ? `<button class="text-button" type="button" data-action="read-notification" data-id="${esc(n.id)}">Mark read</button>` : ""}</article>`).join("") : emptyState("No new notifications","Activity updates will appear here.")}</div></section>`; }
+function renderFeedback() {
+  return `<section class="screen">${head("HELP US IMPROVE","Feedback","Send a product idea, report a problem, or tell us what is confusing.","","","settings")}<form id="feedback-form" class="form-card form-stack compact-form"><label class="select-field"><span>Feedback type</span><select name="type"><option value="bug">Bug or problem</option><option value="idea">Feature idea</option><option value="other">Other feedback</option></select></label><label class="floating-field"><textarea name="message" maxlength="2400" minlength="10" required placeholder=" "></textarea><span>Describe your feedback (10–2400 characters)</span></label><button class="btn btn-primary" type="submit">Send feedback</button><p class="muted small-note">Do not include passwords, sign-in codes, or other confidential information.</p></form></section>`;
+}
+
+function renderLegal() {
+  return `<section class="screen legal-view-screen"><header class="legal-view-toolbar"><button class="page-back" type="button" data-action="close-legal">${icon("back",18)}<span>Back</span></button><span class="legal-toolbar-brand"><img class="legal-brand-icon" src="./assets/brand/icon-192.png" alt="Marvel Chat"><span class="eyebrow">MARVEL CHAT · LEGAL</span></span><button class="icon-btn" type="button" data-action="close-legal" aria-label="Close legal page">${icon("close",18)}</button></header>${state.legalHtml ? `<article class="legal-view-content">${state.legalHtml}</article>` : `<div class="empty-state"><div class="loader"><span></span></div><strong>Loading ${esc(state.legalTitle || "document")}…</strong><span>This stays inside Marvel Chat; your current screen is preserved.</span></div>`}</section>`;
+}
+
 function renderSettings() {
-  return `<section class="screen">${head("PREFERENCES","Settings","Choose how Marvel Chat looks and behaves.", "", "", "profile")}<div class="settings-list"><article class="setting-card"><div class="setting-copy"><strong>Appearance</strong><small>Choose the theme used across the application.</small></div><div class="theme-pills">${["light","dark","system"].map((x) => `<button class="${state.theme === x ? "active" : ""}" type="button" data-action="theme-${x}">${icon(x === "light" ? "sun" : x === "dark" ? "moon" : "system",16)}${x[0].toUpperCase()+x.slice(1)}</button>`).join("")}</div></article><article class="setting-card"><div class="setting-copy"><strong>Notifications</strong><small>Receive Marvel Chat updates on this browser when permission is enabled.</small></div>${state.pushEnabled ? `<button class="btn btn-secondary" type="button" data-action="disable-notifications">Disable</button>` : `<button class="btn btn-primary" type="button" data-action="enable-notifications">Enable</button>`}</article><button class="setting-card setting-link" type="button" data-action="legal-terms"><div class="setting-copy"><strong>Terms</strong><small>Review our service terms.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-privacy"><div class="setting-copy"><strong>Privacy</strong><small>Learn how account and activity data are handled.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-community"><div class="setting-copy"><strong>Community Guidelines</strong><small>Our standards for a useful and trustworthy community.</small></div>${icon("arrow",18)}</button></div></section>`;
+  return `<section class="screen">${head("PREFERENCES","Settings","Choose how Marvel Chat looks and behaves.", "", "", "profile")}<div class="settings-list"><article class="setting-card"><div class="setting-copy"><strong>Appearance</strong><small>Choose the theme used across the application.</small></div><div class="theme-pills">${["light","dark","system"].map((x) => `<button class="${state.theme === x ? "active" : ""}" type="button" data-action="theme-${x}">${icon(x === "light" ? "sun" : x === "dark" ? "moon" : "system",16)}${x[0].toUpperCase()+x.slice(1)}</button>`).join("")}</div></article><article class="setting-card"><div class="setting-copy"><strong>Notifications</strong><small>Receive Marvel Chat updates on this browser when permission is enabled.</small></div>${state.pushEnabled ? `<button class="btn btn-secondary" type="button" data-action="disable-notifications">Disable</button>` : `<button class="btn btn-primary" type="button" data-action="enable-notifications">Enable</button>`}</article><button class="setting-card setting-link" type="button" data-action="legal-terms"><div class="setting-copy"><strong>Terms</strong><small>Review our service terms.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-privacy"><div class="setting-copy"><strong>Privacy</strong><small>Learn how account and activity data are handled.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-community"><div class="setting-copy"><strong>Community Guidelines</strong><small>Our standards for a useful and trustworthy community.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="route-feedback"><div class="setting-copy"><strong>Feedback</strong><small>Send suggestions or report a problem.</small></div>${icon("arrow",18)}</button></div></section>`;
 }
 
 function getBrowserDeviceIds() {
@@ -589,30 +695,61 @@ async function disableBrowserNotifications() {
   }
 }
 
-function openLegal(type) {
-  const routes = {
-    terms: "./terms.html",
-    privacy: "./privacy.html",
-    community: "./community-guidelines.html",
-  };
+async function openLegal(type) {
+  const routes = {terms: "./terms.html", privacy: "./privacy.html", community: "./community-guidelines.html"};
+  const titles = {terms: "Terms", privacy: "Privacy Policy", community: "Community Guidelines"};
   const target = routes[type];
   if (!target) return;
   document.getElementById("menu-root")?.remove();
   closeModal();
-  window.location.assign(target);
+  state.legalReturnRoute = state.route === "legal" ? state.legalReturnRoute : state.route;
+  state.legalTitle = titles[type] || "Legal document";
+  state.legalHtml = "";
+  state.route = "legal";
+  paint();
+  try {
+    const response = await fetch(target, {cache: "force-cache", credentials: "same-origin"});
+    if (!response.ok) throw new Error(`Document could not be loaded (${response.status}).`);
+    const parsed = new DOMParser().parseFromString(await response.text(), "text/html");
+    const content = parsed.querySelector("#legal-content");
+    if (!content) throw new Error("The legal document has an invalid structure.");
+    content.querySelectorAll("script,iframe,object,embed,form").forEach((node) => node.remove());
+    for (const element of content.querySelectorAll("*")) {
+      for (const attr of [...element.attributes]) {
+        if (/^on/i.test(attr.name) || ((attr.name === "href" || attr.name === "src") && /^\s*javascript:/i.test(attr.value))) element.removeAttribute(attr.name);
+      }
+    }
+    state.legalHtml = content.innerHTML;
+  } catch (error) {
+    state.legalHtml = `<div class="legal-load-error"><h1>${esc(state.legalTitle)}</h1><p>${esc(error?.message || "Please try again.")}</p><button class="btn btn-secondary" type="button" data-action="close-legal">Return to Marvel Chat</button></div>`;
+  }
+  if (state.route === "legal") paint();
+}
+
+function closeLegal() {
+  const target = state.legalReturnRoute || (state.user ? "home" : "home");
+  state.route = target === "legal" ? "home" : target;
+  state.legalHtml = "";
+  state.legalTitle = "";
+  paint();
 }
 
 const viewMap = {
   home: renderHome, chat: renderChat, skills: renderSkills, market: renderMarket,
   profile: renderProfile, search: renderSearch, notifications: renderNotifications,
-  settings: renderSettings, "skill-profile": renderSkillProfile,
+  settings: renderSettings, feedback: renderFeedback, "skill-profile": renderSkillProfile,
   business: renderBusiness, "seller-onboarding": renderSellerOnboarding,
   "skill-onboarding": renderSkillOnboarding
 };
 
 function paint() {
+  if (state.route === "legal") {
+    app.innerHTML = state.user ? shell(renderLegal(), false) : renderLegal();
+    return;
+  }
   if (!state.user) { app.innerHTML = authScreen(); return; }
   app.innerHTML = shell((viewMap[state.route] || renderHome)(), state.route === "chat" && Boolean(state.activeThreadId));
+  setupFeedPagination();
 }
 
 async function refreshRouteData(route) {
@@ -648,6 +785,7 @@ async function signup(form) {
   const username = String(d.username || "").trim().replace(/^@/, "").toLowerCase();
   const email = String(d.email || "").trim().toLowerCase();
   const password = String(d.password || "");
+  await authPersistenceReady;
   const credential = await createUserWithEmailAndPassword(auth, email, password);
   if (displayName) await updateAuthProfile(credential.user, {displayName});
   await api.updateProfile({displayName, username, bio: "", location: ""});
@@ -718,6 +856,10 @@ document.addEventListener("click", async (e) => {
   const a = actionEl.dataset.action;
   try {
     if (a === "close-modal") { closeModal(); return; }
+    if (a === "close-legal") { closeLegal(); return; }
+    if (a === "load-more-posts") { await loadMorePosts(); return; }
+    if (a === "toggle-caption") { const id=actionEl.dataset.id; state.captionExpanded = {...state.captionExpanded, [id]: !state.captionExpanded?.[id]}; paint(); return; }
+    if (a === "post-media-prev" || a === "post-media-next") { const id=actionEl.dataset.id; const post=state.posts.find((item)=>item.id===id); const count=Array.isArray(post?.mediaUrls)?post.mediaUrls.length:0; if(count>1){const current=Number(state.postCarouselIndex?.[id]||0);const delta=a==="post-media-next"?1:-1;state.postCarouselIndex={...state.postCarouselIndex,[id]:(current+delta+count)%count};paint();} return; }
     if (a === "auth-welcome") { authMode="welcome"; paint(); return; }
     if (a === "auth-signin") { authMode="signin"; paint(); return; }
     if (a === "auth-signup") { authMode="signup"; paint(); return; }
@@ -730,6 +872,7 @@ document.addEventListener("click", async (e) => {
         button.disabled = true;
       });
       try {
+        await authPersistenceReady;
         await signInWithPopup(auth, new GoogleAuthProvider());
       } finally {
         googleSignInPending = false;
@@ -759,12 +902,12 @@ document.addEventListener("click", async (e) => {
     if (a === "create-menu") { openCreateMenu(); return; }
     if (a === "create-post") { closeModal(); openCreatePost(); return; }
     if (a === "create-moment") { closeModal(); openCreateMoment(); return; }
-    if (a === "submit-post") { const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; closeModal(); toast("Post published.","success"); await loadHome(); paint(); return; }
-    if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); const contentType=String(d.contentType || "text"); const needsPhoto=contentType === "photo" || contentType === "photo_text"; if(needsPhoto && !state.pendingMomentFile){toast("Choose a photo or video for this Moment.","error");return;} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentPhoto(state.pendingMomentFile); await api.createMoment({contentType,text:String(d.text || "").trim(),mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome(); paint(); return; }
+    if (a === "submit-post") { const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; closeModal(); toast("Post published.","success"); await loadHome({force:true}); paint(); return; }
+    if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); const contentType=String(d.contentType || "text"); const needsPhoto=contentType === "photo" || contentType === "photo_text"; if(needsPhoto && !state.pendingMomentFile){toast("Choose a photo or video for this Moment.","error");return;} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentPhoto(state.pendingMomentFile); await api.createMoment({contentType,text:String(d.text || "").trim(),mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome({force:true}); paint(); return; }
     if (a === "post-menu") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Post options",`<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="edit-post" data-id="${esc(p.id)}">Edit post</button><button class="btn btn-secondary btn-block" type="button" data-action="delete-post" data-id="${esc(p.id)}">Delete post</button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`); return; }
     if (a === "edit-post") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Edit post",`<form id="edit-post-form" class="form-stack"><input type="hidden" name="postId" value="${esc(p.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(p.text || "")}</textarea><span>Post text</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${p.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${p.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${p.visibility === "private" ? "selected" : ""}>Private</option></select></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post">Save</button>`); return; }
-    if (a === "submit-edit-post") { const d=Object.fromEntries(new FormData(document.getElementById("edit-post-form"))); await api.updatePost({postId:d.postId,text:String(d.text || "").trim(),visibility:d.visibility}); closeModal(); toast("Post updated.","success"); await loadHome(); paint(); return; }
-    if (a === "delete-post") { await api.deletePost({postId:actionEl.dataset.id}); closeModal(); toast("Post deleted.","success"); await loadHome(); paint(); return; }
+    if (a === "submit-edit-post") { const d=Object.fromEntries(new FormData(document.getElementById("edit-post-form"))); await api.updatePost({postId:d.postId,text:String(d.text || "").trim(),visibility:d.visibility}); closeModal(); toast("Post updated.","success"); await loadHome({force:true}); paint(); return; }
+    if (a === "delete-post") { await api.deletePost({postId:actionEl.dataset.id}); closeModal(); toast("Post deleted.","success"); await loadHome({force:true}); paint(); return; }
     if (a === "like-post") { const r=await api.reactToPost({postId:actionEl.dataset.id,type:"like"}); toast(r?.reacted === false ? "Like removed." : "Post liked.","success"); return; }
     if (a === "save-post") { const r=await api.savePost({postId:actionEl.dataset.id}); toast(r?.saved === false ? "Post unsaved." : "Post saved.","success"); return; }
     if (a === "comment-post") { openComment(actionEl.dataset.id); return; }
@@ -789,7 +932,7 @@ document.addEventListener("click", async (e) => {
     }
     if (a === "load-post-media") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(p) await hydratePostMedia(p); return; }
     if (a === "view-moment") { const m=state.moments.find((x)=>x.id===actionEl.dataset.id); if(!m)return; let urls=[]; if(m.mediaId) { try { urls=await readMomentMedia(m.id,[m.mediaId]); } catch {} } modal(m.uid === state.user.uid ? "Your Moment" : "Moment",`<div class="moment-view"><div class="moment-large-avatar">${avatar(m.author || m,"xl",true)}</div><span class="eyebrow">${esc(m.contentType || "text")}</span><h3>${esc(m.authorSnapshot?.displayName || m.author?.displayName || m.displayName || m.username || "")}</h3>${urls[0]?.url ? `<img class="moment-view-image" src="${esc(urls[0].url)}" alt="Moment photo" loading="lazy">` : ""}<p>${esc(m.text || "")}</p><small>${formatDate(m.createdAt)}</small></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Done</button>${m.uid === state.user.uid || m.authorUid === state.user.uid ? `<button class="btn btn-primary" type="button" data-action="delete-moment" data-id="${esc(m.id)}">Delete</button>` : ""}`); return; }
-    if (a === "delete-moment") { await api.deleteMoment({momentId:actionEl.dataset.id}); closeModal(); toast("Moment deleted.","success"); await loadHome(); paint(); return; }
+    if (a === "delete-moment") { await api.deleteMoment({momentId:actionEl.dataset.id}); closeModal(); toast("Moment deleted.","success"); await loadHome({force:true}); paint(); return; }
     if (a === "clear-home-search") { state.searchQuery="";state.homeSearchResults=[];paint();return; }
     if (a === "clear-chat-search") { state.chatSearchQuery="";state.chatSearchResults=[];paint();return; }
     if (a === "focus-chat-search") { state.route="chat"; paint(); setTimeout(()=>document.querySelector('#chat-person-search-form input[name="query"]')?.focus(),0); return; }
@@ -821,7 +964,7 @@ document.addEventListener("click", async (e) => {
     if (a === "commerce-status") { await api.updateMarketCommerceRequestStatus({requestId:actionEl.dataset.id,status:actionEl.dataset.status});toast("Commerce request updated.","success");await loadBusinessWorkspace();paint();return; }
     if (a === "edit-profile") { openProfileEdit();return; }
     if (a === "submit-profile") { const d=Object.fromEntries(new FormData(document.getElementById("profile-form"))); await api.updateProfile({displayName:String(d.displayName).trim(),username:String(d.username).trim().replace(/^@/,"").toLowerCase(),bio:String(d.bio || "").trim(),location:String(d.location || "").trim()}); await updateAuthProfile(state.user,{displayName:String(d.displayName).trim()}); state.profile={...state.profile,...d,displayName:String(d.displayName).trim()};closeModal();toast("Profile updated.","success");paint();return; }
-    if (a === "read-notification") { await api.markNotificationRead({notificationId:actionEl.dataset.id});await loadNotifications();paint();return; }
+    if (a === "read-notification") { const notificationId=actionEl.dataset.id;await api.markNotificationRead({notificationId});state.notifications=state.notifications.filter((n)=>n.id!==notificationId);state.unreadNotifications=Math.max(0,state.unreadNotifications-1);paint();await loadNotifications();paint();return; }
     if (a === "enable-notifications") { await enableBrowserNotifications(); return; }
     if (a === "disable-notifications") { await disableBrowserNotifications(); return; }
     if (a.startsWith("theme-")) { const t=a.slice(6);setTheme(t);paint();try{await api.updateUserSettings({themeId:t});}catch{}return; }
@@ -896,16 +1039,61 @@ document.addEventListener("submit", async (e) => {
   const f=e.target;if(!f)return;
   try {
     if(f.id === "signup-form"){e.preventDefault();await signup(f);toast("Your account is ready.","success");return;}
-    if(f.id === "signin-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));try{await signInWithEmailAndPassword(auth,String(d.email).trim(),String(d.password));}catch(err){console.error("[Marvel Chat] email sign-in",err?.code,err?.message);throw err;}return;}
+    if(f.id === "signin-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));try{await authPersistenceReady;await signInWithEmailAndPassword(auth,String(d.email).trim(),String(d.password));}catch(err){console.error("[Marvel Chat] email sign-in",err?.code,err?.message);throw err;}return;}
     if(f.id === "forgot-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));await sendPasswordResetEmail(auth,String(d.email).trim());toast("If an account matches that email, a reset link is on its way.","success");return;}
+    if(f.id === "feedback-form"){
+      e.preventDefault();
+      if(state.feedbackSubmitting) return;
+      const d=Object.fromEntries(new FormData(f));
+      const message=String(d.message || "").trim();
+      if(message.length<10){toast("Please enter at least 10 characters.","error");return;}
+      state.feedbackSubmitting=true;
+      const submit=f.querySelector('button[type="submit"]');
+      if(submit){submit.disabled=true;submit.textContent="Sending…";}
+      try{
+        const selectedType = String(d.type || "other");
+        const category = selectedType === "bug" ? "bug" :
+          selectedType === "idea" ? "suggestion" : "feedback";
+        await api.submitFeedback({category,message,route:state.route});
+        f.reset();toast("Feedback sent. Thank you.","success");
+      } finally {
+        state.feedbackSubmitting=false;
+        if(submit){submit.disabled=false;submit.textContent="Send feedback";}
+      }
+      return;
+    }
     if(f.id === "message-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));const text=String(d.text || "").trim();if(!text)return;await api.sendMessage({threadId:state.activeThreadId,text});f.reset();return;}
-    if(f.id === "home-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();if(state.searchQuery.length<2){state.homeSearchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:"all"});state.homeSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
+    if(f.id === "home-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();if(state.searchQuery.length<2){state.homeSearchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:"home"});state.homeSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "chat-person-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.chatSearchQuery=String(d.query || "").trim();if(state.chatSearchQuery.length<2){state.chatSearchResults=[];paint();return;}const r=await api.search({query:state.chatSearchQuery,scope:"users"});state.chatSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "skills-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.skillsSearchQuery=String(d.query || "").trim();paint();return;}
     if(f.id === "search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.searchScope=String(d.scope || "all");if(state.searchQuery.length<2){state.searchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:state.searchScope});state.searchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "market-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();await loadMarket();paint();return;}
   } catch(err) { e.preventDefault(); console.error(err?.code,err?.message); toast(friendlyError(err),"error"); }
 });
+
+let postCarouselTouchStart = null;
+document.addEventListener("touchstart", (e) => {
+  const carousel = e.target.closest?.("[data-post-carousel]");
+  if (!carousel || e.target.closest?.("video,button")) return;
+  const touch = e.changedTouches?.[0];
+  if (touch) postCarouselTouchStart = {id: carousel.dataset.postCarousel, x: touch.clientX, y: touch.clientY};
+}, {passive: true});
+document.addEventListener("touchend", (e) => {
+  const start = postCarouselTouchStart;
+  postCarouselTouchStart = null;
+  if (!start) return;
+  const touch = e.changedTouches?.[0];
+  if (!touch) return;
+  const dx = touch.clientX - start.x;
+  const dy = touch.clientY - start.y;
+  if (Math.abs(dx) < 45 || Math.abs(dx) < Math.abs(dy)) return;
+  const post = state.posts.find((item) => item.id === start.id);
+  const count = Array.isArray(post?.mediaUrls) ? post.mediaUrls.length : 0;
+  if (count < 2) return;
+  const current = Number(state.postCarouselIndex?.[start.id] || 0);
+  state.postCarouselIndex = {...state.postCarouselIndex, [start.id]: (current + (dx < 0 ? 1 : -1) + count) % count};
+  paint();
+}, {passive: true});
 
 document.addEventListener("keydown", (e) => {
   if(e.key === "/" && !["INPUT","TEXTAREA","SELECT"].includes(e.target.tagName)){e.preventDefault();go("search");setTimeout(()=>document.querySelector('#search-form input[name="query"]')?.focus(),0);}
@@ -915,14 +1103,36 @@ document.addEventListener("keydown", (e) => {
 if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
 app.innerHTML=`<main class="splash"><section class="splash-card"><div class="brand-mark brand-mark-xl"><img src="./assets/brand/icon-512.png" alt="Marvel Chat"></div><h1>Marvel Chat</h1><p>by Davonium Technologies</p><div class="loader"><span></span></div></section></main>`;
 
-onAuthStateChanged(auth, async (user) => {
+void authPersistenceReady.then(() => onAuthStateChanged(auth, async (user) => {
   clearSubscriptions();
+  if (state.feedObserver) { state.feedObserver.disconnect(); state.feedObserver = null; }
+  const previousUid = state.user?.uid || "";
   state.user=user;
   state.activeThreadId=null;
   state.messages=[];
-  if(!user){state.profile=null;state.skillProfile=null;state.myStore=null;state.route="home";authMode="welcome";paint();return;}
-  try{await loadProfile();}catch(e){toast(friendlyError(e),"error");}
+  if(!user){
+    state.profile=null;state.skillProfile=null;state.myStore=null;state.posts=[];state.moments=[];state.threads=[];state.notifications=[];state.unreadNotifications=0;state.followingIds=[];state.followStats={followersCount:0,followingCount:0};state.homeLoadedAt=0;state.postsCursor=null;state.hasMorePosts=false;state.legalHtml="";state.route="home";authMode="welcome";paint();return;
+  }
+  if (previousUid && previousUid !== user.uid) {
+    state.posts=[];state.moments=[];state.threads=[];state.notifications=[];state.unreadNotifications=0;state.homeLoadedAt=0;
+  }
+  state.profile = {
+    uid: user.uid,
+    displayName: user.displayName || "",
+    email: user.email || "",
+    photoURL: user.photoURL || "",
+    initial: String(user.displayName || user.email || "U").trim().charAt(0).toUpperCase() || "U"
+  };
   try{ state.pushEnabled = typeof Notification !== "undefined" && Notification.permission === "granted"; }catch{}
   paint();
+  const authUid = user.uid;
+  void loadProfile(user).then(() => { if (state.user?.uid === authUid) paint(); })
+    .catch((e) => { if (state.user?.uid === authUid) console.warn("[Marvel Chat] Profile refresh unavailable", e?.code || "unknown"); });
   void refreshRouteData(state.route);
+  // Secondary counts load after the authenticated app shell has already rendered.
+  void loadFollowSummary();
+  void refreshUnreadCount();
+})).catch((error) => {
+  console.error("[Marvel Chat] Auth initialization failed", error?.code || "unknown");
+  app.innerHTML = `<main class="splash"><section class="splash-card"><h1>Marvel Chat</h1><p>Sign-in could not be initialized. Refresh and try again.</p></section></main>`;
 });

@@ -4,9 +4,10 @@ import {appMeta} from "./config.js";
 const names = [
   "getPlatformStatus", "ensureUserProfile", "updateProfile", "updateUserSettings",
   "registerDevice", "unregisterDevice", "markNotificationRead", "getMyNotificationSummary",
-  "createPost", "updatePost", "deletePost", "createMoment", "deleteMoment",
+  "getPublicProfiles", "submitFeedback",
+  "createPost", "updatePost", "deletePost", "createMoment", "updateMoment", "deleteMoment",
   "reactToPost", "commentOnPost", "savePost",
-  "createChatThread", "sendMessage", "markThreadRead", "deleteMessage",
+  "createChatThread", "sendMessage", "markThreadRead", "deleteMessage", "editMessage",
   "upsertSkillProfile", "createSkillListing", "updateSkillListing", "deleteSkillListing",
   "createSkillRequest", "createSkillOffer", "acceptSkillOffer", "declineSkillOffer",
   "completeSkillRequest", "cancelSkillRequest", "createSkillReview",
