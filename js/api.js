@@ -1,14 +1,11 @@
-import {functions, httpsCallableFromURL, appCheckReady} from "./firebase.js";
-import {appMeta} from "./config.js";
+import {httpsCallable, appCheckReady} from "./firebase.js";
 
 const names = [
-  "getPlatformStatus", "ensureUserProfile", "updateProfile", "updateUserSettings",
-  "registerDevice", "unregisterDevice", "markNotificationRead", "getMyNotificationSummary",
-  "getPublicProfiles", "submitFeedback", "getMyMediaDailyUsage",
-  "cleanupDeletedMedia", "updateChatThreadPreference",
-  "createPost", "updatePost", "deletePost", "createMoment", "updateMoment", "deleteMoment",
-  "reactToPost", "commentOnPost", "getPostComments", "getMySavedPosts", "savePost",
-  "createChatThread", "sendMessage", "markThreadRead", "deleteMessage", "editMessage",
+  "getPlatformStatus", "ensureUserProfile", "getPublicProfiles", "updateProfile", "updateUserSettings",
+  "registerDevice", "unregisterDevice", "markNotificationRead", "getMyNotificationSummary", "submitFeedback",
+  "createPost", "updatePost", "deletePost", "getHomeFeed", "getHomeMoments", "createMoment", "updateMoment", "deleteMoment",
+  "reactToPost", "commentOnPost", "getPostComments", "savePost", "getMySavedPosts",
+  "createChatThread", "sendMessage", "markThreadRead", "deleteMessage", "editMessage", "updateChatThreadPreference",
   "upsertSkillProfile", "createSkillListing", "updateSkillListing", "deleteSkillListing",
   "createSkillRequest", "createSkillOffer", "acceptSkillOffer", "declineSkillOffer",
   "completeSkillRequest", "cancelSkillRequest", "createSkillReview",
@@ -16,24 +13,11 @@ const names = [
   "setProductInventory", "setProductAvailability", "archiveProduct", "createProductCategory",
   "createMarketCommerceRequest", "updateMarketCommerceRequestStatus", "createMarketProductReview",
   "discoverMarketProducts", "search",
-  "createMediaUpload", "finalizeMediaUpload", "createMediaReadUrls",
-  "followUser", "unfollowUser", "getFollowState", "getFollowList"
+  "createMediaUpload", "finalizeMediaUpload", "createMediaReadUrls", "cleanupDeletedMedia", "getMyMediaDailyUsage",
+  "followUser", "unfollowUser", "getFollowState", "getFollowList", "reportContent"
 ];
 
-function callableUrl(name) {
-  return `https://${appMeta.region}-${appMeta.projectId}.cloudfunctions.net/${name}`;
-}
-
-const fns = Object.fromEntries(
-    names.map((name) => [
-      name,
-      httpsCallableFromURL(
-          functions,
-          callableUrl(name),
-          {timeout: 70000},
-      ),
-    ]),
-);
+const fns = Object.fromEntries(names.map((name) => [name, httpsCallable(name)]));
 
 export async function call(name, data = {}) {
   if (!fns[name]) throw new Error(`Unknown operation: ${name}`);

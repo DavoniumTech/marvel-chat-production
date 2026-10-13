@@ -19,18 +19,13 @@ export const ALLOWED_HOME_MEDIA_TYPES = new Set([
   "video/quicktime"
 ]);
 
-export const ALLOWED_IMAGE_TYPES = new Set([
-  "image/jpeg", "image/png", "image/webp", "image/gif"
+export const ALLOWED_MOMENT_MEDIA_TYPES = new Set([
+  "image/jpeg", "image/png", "image/webp", "image/gif",
+  "video/mp4", "video/webm", "video/quicktime"
 ]);
 
-export const ALLOWED_MOMENT_MEDIA_TYPES = new Set([
-  "image/jpeg",
-  "image/png",
-  "image/webp",
-  "image/gif",
-  "video/mp4",
-  "video/webm",
-  "video/quicktime"
+export const ALLOWED_PHOTO_TYPES = new Set([
+  "image/jpeg", "image/png", "image/webp", "image/gif"
 ]);
 
 function ensureFile(file, allowedTypes, label) {
@@ -249,19 +244,11 @@ export async function prepareMediaFile(file, allowedTypes = ALLOWED_HOME_MEDIA_T
 }
 
 async function upload(file, feature, allowedTypes) {
-  const optimized = await prepareMediaFile(
-      file,
-      allowedTypes,
-      feature === "home_post" ? "media" : "image",
-  );
+  const label = feature === "home_post" || file?.type?.startsWith("video/") ? "media" : "image";
+  const optimized = await prepareMediaFile(file, allowedTypes, label);
 
   if (optimized.size > MAX_MEDIA_BYTES) {
     throw new Error("The optimized media is still above the 2 MiB per-item limit. Choose a smaller file.");
-  }
-
-  const usage = await api.getMyMediaDailyUsage({});
-  if (Number(usage?.remainingBytes || 0) < optimized.size) {
-    throw new Error("Your remaining daily media allowance is too small for this file.");
   }
 
   const ticket = await api.createMediaUpload({
@@ -315,12 +302,7 @@ export async function uploadHomeMediaFiles(files) {
   }
 
   if (totalBytes > DAILY_MEDIA_BYTES) {
-    throw new Error("The selected media exceeds the 2 MiB combined limit.");
-  }
-  const usage = await api.getMyMediaDailyUsage({});
-  if (totalBytes > Number(usage?.remainingBytes || 0)) {
-    const remaining = Math.max(0, Number(usage?.remainingBytes || 0));
-    throw new Error(`Only ${(remaining / 1024).toFixed(0)} KiB remain in today's shared upload allowance.`);
+    throw new Error("The optimized selection exceeds your 2 MiB daily media allowance.");
   }
 
   const ids = [];
@@ -354,8 +336,12 @@ export async function readPostMedia(postId, mediaIds) {
   return Array.isArray(result?.urls) ? result.urls : [];
 }
 
-export async function uploadMomentPhoto(file) {
+export async function uploadMomentMedia(file) {
   return upload(file, "moment", ALLOWED_MOMENT_MEDIA_TYPES);
+}
+
+export async function uploadMomentPhoto(file) {
+  return uploadMomentMedia(file);
 }
 
 export async function readMomentMedia(momentId, mediaIds) {
@@ -369,28 +355,43 @@ export async function readMomentMedia(momentId, mediaIds) {
   return Array.isArray(result?.urls) ? result.urls : [];
 }
 
-
-/** Uploads one optimized image for a supported product engine. */
-export async function uploadFeaturePhoto(file, feature) {
-  if (!["profile_photo", "skill_listing", "market_product"].includes(feature)) {
-    throw new Error("Unsupported photo destination.");
-  }
-  return upload(file, feature, ALLOWED_IMAGE_TYPES);
+export async function uploadProfilePhoto(file) {
+  return upload(file, "profile_photo", ALLOWED_PHOTO_TYPES);
 }
 
-/** Returns signed URLs for media attached to a trusted parent document. */
-export async function readFeatureMedia(parentId, mediaIds, feature, parentCollection) {
-  if (!parentId || !Array.isArray(mediaIds) || mediaIds.length === 0) return [];
+export async function readProfilePhoto(uid, mediaId) {
+  if (!uid || !mediaId) return "";
   const result = await api.createMediaReadUrls({
-    mediaIds,
-    feature,
-    parentId,
-    parentCollection
+    mediaIds: [mediaId],
+    feature: "profile_photo",
+    parentId: uid,
+    parentCollection: "users"
+  });
+  return typeof result?.urls?.[0]?.url === "string" ? result.urls[0].url : "";
+}
+
+export async function uploadMarketProductPhoto(file) {
+  return upload(file, "market_product", ALLOWED_PHOTO_TYPES);
+}
+
+export async function readMarketProductMedia(productId, mediaIds) {
+  if (!productId || !Array.isArray(mediaIds) || mediaIds.length === 0) return [];
+  const result = await api.createMediaReadUrls({
+    mediaIds: mediaIds.slice(0, 5), feature: "market_product",
+    parentId: productId, parentCollection: "products"
   });
   return Array.isArray(result?.urls) ? result.urls : [];
 }
 
-/** Read the server-enforced daily media allowance. */
-export async function getDailyMediaUsage() {
-  return api.getMyMediaDailyUsage({});
+export async function uploadSkillListingPhoto(file) {
+  return upload(file, "skill_listing", ALLOWED_PHOTO_TYPES);
+}
+
+export async function readSkillListingMedia(listingId, mediaIds) {
+  if (!listingId || !Array.isArray(mediaIds) || mediaIds.length === 0) return [];
+  const result = await api.createMediaReadUrls({
+    mediaIds: mediaIds.slice(0, 5), feature: "skill_listing",
+    parentId: listingId, parentCollection: "skillListings"
+  });
+  return Array.isArray(result?.urls) ? result.urls : [];
 }

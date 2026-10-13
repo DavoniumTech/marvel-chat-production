@@ -18,15 +18,13 @@ import {
   doc,
   getDoc,
   getDocs,
-  getCountFromServer,
   query,
   where,
   orderBy,
   limit,
-  startAfter,
   onSnapshot
 } from "https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore.js";
-import {getFunctions, httpsCallable, httpsCallableFromURL} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js";
+import {getFunctions, httpsCallable} from "https://www.gstatic.com/firebasejs/12.19.0/firebase-functions.js";
 import {
   initializeAppCheck,
   ReCaptchaEnterpriseProvider,
@@ -60,10 +58,12 @@ export function initAppCheck() {
 initAppCheck();
 
 export const auth = getAuth(firebaseApp);
-export const authPersistenceReady = setPersistence(auth, browserLocalPersistence)
+// Await persistence before account actions so a successful login isn't raced
+// against local-session persistence initialization.
+export const persistenceReady = setPersistence(auth, browserLocalPersistence)
   .then(() => true)
   .catch((error) => {
-    console.warn("[Marvel Chat] Browser persistence could not be configured.", error?.code || "unknown");
+    console.warn("[Marvel Chat] persistent auth setup unavailable", error?.code);
     return false;
   });
 export const db = getFirestore(firebaseApp);
@@ -109,13 +109,10 @@ export {
   doc,
   getDoc,
   getDocs,
-  getCountFromServer,
   query,
   where,
   orderBy,
   limit,
-  startAfter,
   onSnapshot,
   httpsCallable,
-  httpsCallableFromURL,
 };
