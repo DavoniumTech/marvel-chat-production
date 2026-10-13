@@ -43,8 +43,11 @@ assert "6LcYItwtAAAAAFWkMn7GYro06LuG3VMR1K0U1Xgb" in Path("js/config.js").read_t
 for name in ("getPublicProfiles", "submitFeedback"):
   assert f'"{name}"' in chunk, f"Missing required live callable {name}"
 app = Path("js/app.js").read_text()
-assert 'scope:"home"' in app, "Home search must be People + Posts only"
+assert 'scope:"people_posts"' in app, "Home search must be People + Posts only"
 assert "startAfter(state.postsCursor)" in app, "Cursor pagination must be present"
+assert "const HOME_PAGE_SIZE = 5" in app, "Initial feed must load five posts"
+assert "const HOME_NEXT_PAGE_SIZE = 3" in app, "Next feed page must load three posts"
+assert "getMyMediaDailyUsage" in Path("js/api.js").read_text(), "Daily quota callable missing"
 assert 'window.location.assign(target)' not in app, "Legal navigation must not reload the app"
 print("CALLABLE_CATALOG_CHECK=PASS")
 print("APP_CHECK_CONFIG_CHECK=PASS")

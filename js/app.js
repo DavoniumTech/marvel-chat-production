@@ -14,7 +14,7 @@ import {
 } from "./ui.js";
 import {icon} from "./icons.js";
 import {
-  uploadHomePhoto, uploadHomeMedia, uploadHomeMediaFiles, readPostMedia, uploadMomentPhoto, readMomentMedia, validateHomeFiles, prepareMediaFile
+  uploadHomePhoto, uploadHomeMedia, uploadHomeMediaFiles, readPostMedia, uploadMomentPhoto, readMomentMedia, validateHomeFiles, prepareMediaFile, uploadFeaturePhoto, readFeatureMedia, ALLOWED_IMAGE_TYPES
 } from "./media.js";
 
 const app = document.getElementById("app");
@@ -116,7 +116,7 @@ function authScreen() {
       </form><button class="text-button auth-back" type="button" data-action="auth-signin">Back to sign in</button>`);
   }
 
-  return wrap(`<div class="auth-heading auth-heading-welcome"><span class="eyebrow">WELCOME</span><h2>More than a chat.</h2><p>Connect with people, discover skills, explore opportunities, and build your world.</p></div>
+  return wrap(`<div class="welcome-code-motif" aria-hidden="true"><span>const community = await connect();</span><span>profile · chat · skills · market</span><span>return { privacy: true, growth: "together" };</span></div><div class="auth-heading auth-heading-welcome"><span class="eyebrow">WELCOME</span><h2>More than a chat.</h2><p>Connect with people, discover skills, explore opportunities, and build your world.</p></div>
     <div class="auth-actions">${googleButton()}<button class="btn btn-primary btn-block btn-lg" type="button" data-action="auth-signup">Create account</button><button class="btn btn-secondary btn-block" type="button" data-action="auth-signin">Sign in</button></div>
     <div class="auth-points"><span>${icon("shield", 16)}Secure identity</span><span>${icon("grid", 16)}One community</span><span>${icon("spark", 16)}Built to grow</span></div>`);
 }
@@ -283,7 +283,25 @@ async function loadProfile(user = state.user) {
   state.profile.displayName = state.profile.displayName || user.displayName || "";
   state.profile.email = state.profile.email || user.email || "";
   state.profile.photoURL = state.profile.photoURL || user.photoURL || "";
+  if (state.profile.photoMediaId) {
+    try {
+      const urls = await readFeatureMedia(uid, [state.profile.photoMediaId], "profile_photo", "users");
+      if (state.user?.uid === uid && urls[0]?.url) state.profile.photoURL = urls[0].url;
+    } catch (error) {
+      console.debug("[Marvel Chat] Profile photo URL unavailable", error?.code || "unknown");
+    }
+  }
   state.profile.initial = String(state.profile.displayName || state.profile.username || user.displayName || user.email || "U").trim().charAt(0).toUpperCase() || "U";
+  try {
+    const countSnap = await getCountFromServer(query(
+      collection(db, "posts"),
+      where("authorUid", "==", uid),
+      where("status", "==", "active"),
+    ));
+    if (state.user?.uid === uid) state.profile.postsCount = countSnap.data().count;
+  } catch (error) {
+    console.debug("[Marvel Chat] Profile post count unavailable", error?.code || "unknown");
+  }
 }
 
 async function loadFollowSummary() {
@@ -321,8 +339,64 @@ async function refreshUnreadCount() {
   }
 }
 
-const HOME_PAGE_SIZE = 10;
+const HOME_PAGE_SIZE = 5;
+const HOME_NEXT_PAGE_SIZE = 3;
 const HOME_CACHE_MS = 60 * 1000;
+
+async function hydratePublicProfiles(items) {
+  const uids = [...new Set((items || []).map((item) =>
+    String(uidOf(item) || uidOf(item.authorSnapshot || {}) || "")
+  ).filter((uid) => uid && uid !== state.user?.uid))];
+  const now = Date.now();
+  state.publicProfilesByUid ||= {};
+  const missing = uids.filter((uid) => {
+    const cached = state.publicProfilesByUid[uid];
+    return !cached || now - Number(cached.cachedAt || 0) > 60_000;
+  });
+  for (let i = 0; i < missing.length; i += 25) {
+    const batch = missing.slice(i, i + 25);
+    if (!batch.length) continue;
+    try {
+      const result = await api.getPublicProfiles({userIds: batch});
+      for (const profile of (result?.profiles || [])) {
+        state.publicProfilesByUid[profile.uid] = {...profile, cachedAt: now};
+      }
+    } catch (error) {
+      console.debug("[Marvel Chat] Public profile hydration unavailable", error?.code || "unknown");
+    }
+  }
+  const targets = uids.map((uid) => state.publicProfilesByUid[uid]).filter(Boolean)
+      .filter((profile) => profile.photoMediaId &&
+        (!profile.photoURLExpiresAt || profile.photoURLExpiresAt < now + 30_000));
+  await Promise.all(targets.map(async (profile) => {
+    try {
+      const urls = await readFeatureMedia(
+          profile.uid, [profile.photoMediaId], "profile_photo", "users",
+      );
+      if (urls[0]?.url) {
+        profile.photoURL = urls[0].url;
+        profile.photoURLExpiresAt = Date.now() + 9 * 60 * 1000;
+      }
+    } catch (error) {
+      console.debug("[Marvel Chat] Public profile photo unavailable", error?.code || "unknown");
+    }
+  }));
+  return items;
+}
+
+function authorFor(item) {
+  const uid = String(uidOf(item) || "");
+  const profile = state.publicProfilesByUid?.[uid] || {};
+  const snapshot = item?.authorSnapshot || item?.author || item || {};
+  return {
+    ...snapshot,
+    ...profile,
+    uid: profile.uid || uid,
+    displayName: profile.displayName || snapshot.displayName || item?.displayName || "",
+    username: profile.username || snapshot.username || item?.username || "",
+    photoURL: profile.photoURL || snapshot.photoURL || snapshot.photoUrl || "",
+  };
+}
 
 async function loadHome({force = false} = {}) {
   if (!state.user || state.homeLoading) return;
@@ -340,14 +414,11 @@ async function loadHome({force = false} = {}) {
     state.hasMorePosts = ps.docs.length === HOME_PAGE_SIZE;
     const now = Date.now();
     const active = ms.docs.map((d) => ({id:d.id,...d.data()})).filter((x) => !x.expiresAt || stamp(x.expiresAt) > now);
-    const own = active.filter((x) => uidOf(x) === state.user.uid || x.uid === state.user.uid).slice(0,1);
+    const own = active.filter((x) => uidOf(x) === state.user.uid || x.uid === state.user.uid || x.authorUid === state.user.uid).slice(0,1);
     const latest = active.filter((x) => !own.some((o) => o.id === x.id)).slice(0,12);
     state.moments = [...own, ...latest];
+    await hydratePublicProfiles([...state.posts, ...state.moments]);
     state.homeLoadedAt = Date.now();
-    state.posts.filter((p) => Array.isArray(p.mediaIds) && p.mediaIds.length).slice(0,3).forEach((p) => {
-      p.mediaUrls = null;
-      void hydratePostMedia(p);
-    });
   } finally {
     state.homeLoading = false;
   }
@@ -364,22 +435,49 @@ async function loadMorePosts() {
       where("status","==","active"),
       orderBy("createdAt","desc"),
       startAfter(state.postsCursor),
-      limit(HOME_PAGE_SIZE)
+      limit(HOME_NEXT_PAGE_SIZE)
     ));
     const known = new Set(state.posts.map((p) => p.id));
     const more = snapshot.docs.map((d) => ({id:d.id,...d.data()})).filter((p) => !known.has(p.id));
+    await hydratePublicProfiles(more);
     state.posts.push(...more);
     state.postsCursor = snapshot.docs.length ? snapshot.docs[snapshot.docs.length - 1] : state.postsCursor;
-    state.hasMorePosts = snapshot.docs.length === HOME_PAGE_SIZE;
-    more.filter((p) => Array.isArray(p.mediaIds) && p.mediaIds.length).slice(0,3).forEach((p) => {
-      p.mediaUrls = null;
-      void hydratePostMedia(p);
-    });
+    state.hasMorePosts = snapshot.docs.length === HOME_NEXT_PAGE_SIZE;
   } catch (error) {
     toast(friendlyError(error), "error");
     state.hasMorePosts = false;
   } finally {
     state.isLoadingMorePosts = false;
+    paint();
+  }
+}
+
+async function loadSavedPosts({append = false} = {}) {
+  if (!state.user || state.savedPostsLoading) return;
+  state.savedPostsLoading = true;
+  if (!append) {
+    state.savedPosts = [];
+    state.savedPostsCursor = null;
+    state.savedPostsHasMore = false;
+  }
+  paint();
+  try {
+    const response = await api.getMySavedPosts({
+      limit: append ? 3 : 5,
+      cursor: append ? state.savedPostsCursor : null,
+    });
+    const incoming = Array.isArray(response?.posts) ? response.posts : [];
+    const prior = append ? state.savedPosts : [];
+    const known = new Set(prior.map((item) => item.id));
+    const unique = incoming.filter((item) => !known.has(item.id));
+    await hydratePublicProfiles(unique);
+    state.savedPosts = [...prior, ...unique];
+    state.savedPostsCursor = response?.nextCursor || null;
+    state.savedPostsHasMore = Boolean(response?.nextCursor);
+  } catch (error) {
+    toast(friendlyError(error), "error");
+  } finally {
+    state.savedPostsLoading = false;
     paint();
   }
 }
@@ -396,15 +494,64 @@ function setupFeedPagination() {
   }, {root: document.querySelector(".main-scroll"), rootMargin: "320px 0px"});
   state.feedObserver.observe(sentinel);
 }
+function setupLazyPostMedia() {
+  if (state.mediaObserver) state.mediaObserver.disconnect();
+  if (!("IntersectionObserver" in window) || state.route !== "home") return;
+  const root = document.querySelector(".main-scroll");
+  state.mediaObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const postId = entry.target.dataset.id;
+      const post = [...state.posts, ...state.savedPosts].find((item) => item.id === postId);
+      state.mediaObserver?.unobserve(entry.target);
+      if (post && !Array.isArray(post.mediaUrls) && !post.mediaLoading) {
+        void hydratePostMedia(post);
+      }
+    }
+  }, {root, rootMargin: "240px 0px"});
+  document.querySelectorAll('[data-action="load-post-media"]').forEach((item) =>
+    state.mediaObserver.observe(item),
+  );
+}
+
 async function hydratePostMedia(post) {
-  if (!post?.id || !Array.isArray(post.mediaIds) || !post.mediaIds.length || Array.isArray(post.mediaUrls)) return;
-  try { post.mediaUrls = await readPostMedia(post.id, post.mediaIds); } catch { post.mediaUrls = []; }
+  if (!post?.id || !Array.isArray(post.mediaIds) || !post.mediaIds.length || Array.isArray(post.mediaUrls) || post.mediaLoading) return;
+  post.mediaLoading = true;
   paint();
+  try {
+    post.mediaUrls = await readPostMedia(post.id, post.mediaIds);
+    post.mediaLoadFailed = false;
+  } catch {
+    post.mediaUrls = [];
+    post.mediaLoadFailed = true;
+  } finally {
+    post.mediaLoading = false;
+    paint();
+  }
+}
+
+async function hydrateFeatureResource(item, feature, collectionName, parentId) {
+  if (!item || !parentId || !Array.isArray(item.mediaIds) || !item.mediaIds.length || Array.isArray(item.mediaUrls)) return;
+  try {
+    const urls = await readFeatureMedia(parentId, item.mediaIds.slice(0, 8), feature, collectionName);
+    item.mediaUrls = urls;
+  } catch {
+    item.mediaUrls = [];
+  }
+  if (["skills", "market", "skill-profile", "business"].includes(state.route)) paint();
 }
 
 async function loadThreads() {
   const s = await getDocs(query(collection(db,"chatThreads"), where("participantIds","array-contains",state.user.uid), limit(50)));
-  state.threads = s.docs.map((d) => ({id:d.id,...d.data()})).sort((a,b) => stamp(b.updatedAt || b.lastMessageAt) - stamp(a.updatedAt || a.lastMessageAt));
+  state.threads = s.docs.map((d) => ({id:d.id,...d.data()}))
+    .filter((thread) => !Array.isArray(thread.hiddenForUids) ||
+      !thread.hiddenForUids.includes(state.user.uid))
+    .sort((a,b) => {
+      const aPinned = Array.isArray(a.pinnedUids) && a.pinnedUids.includes(state.user.uid);
+      const bPinned = Array.isArray(b.pinnedUids) && b.pinnedUids.includes(state.user.uid);
+      if (aPinned !== bPinned) return aPinned ? -1 : 1;
+      return stamp(b.updatedAt || b.lastMessageAt) - stamp(a.updatedAt || a.lastMessageAt);
+    });
   const peerIds = [...new Set(state.threads.flatMap((thread) => participants(thread).map(String).filter((uid) => uid && uid !== state.user.uid)))];
   const missing = peerIds.filter((uid) => !state.threadPeers?.[uid] || (!state.threadPeers[uid].displayName && !state.threadPeers[uid].username));
   if (missing.length) {
@@ -435,7 +582,9 @@ async function findOrCreateDirectThread(targetUid, profile) {
 async function loadMessages(id) {
   clearSubscriptions();
   const u = onSnapshot(query(collection(db,"chatThreads",id,"messages"), orderBy("createdAt","asc"), limit(100)), (s) => {
-    state.messages = s.docs.map((d) => ({id:d.id,...d.data()}));
+    state.messages = s.docs.map((d) => ({id:d.id,...d.data()}))
+      .filter((message) => !Array.isArray(message.hiddenForUids) ||
+        !message.hiddenForUids.includes(state.user.uid));
     paint();
     requestAnimationFrame(() => { const box = document.querySelector(".messages"); if (box) box.scrollTop = box.scrollHeight; });
   }, (error) => toast(friendlyError(error),"error"));
@@ -450,6 +599,17 @@ async function loadSkills() {
   ]);
   state.skills = listingSnap.docs.map((d) => ({id:d.id,...d.data()}));
   state.skillCategories = categorySnap.docs.map((d) => ({id:d.id,...d.data()}));
+  const providerIds = [...new Set(state.skills.map((item) => item.providerUid).filter(Boolean))].slice(0, 20);
+  if (providerIds.length) {
+    try {
+      const response = await api.getPublicProfiles({userIds: providerIds});
+      const profiles = new Map((response?.profiles || []).map((profile) => [String(profile.uid), profile]));
+      state.skills = state.skills.map((item) => ({...item, providerProfile: profiles.get(String(item.providerUid)) || null}));
+    } catch (error) {
+      console.debug("[Marvel Chat] Skills provider identity unavailable", error?.code || "unknown");
+    }
+  }
+  state.skills.slice(0, 3).forEach((item) => void hydrateFeatureResource(item, "skill_listing", "skillListings", item.id));
 }
 
 async function loadSkillWorkspace() {
@@ -475,6 +635,10 @@ async function loadMarket() {
   state.products = Array.isArray(r?.results) ? r.results : [];
   state.marketCategories = categorySnap.docs.map((d) => ({id:d.id,...d.data()}));
   state.myStore = storeSnap.docs.length ? {id:storeSnap.docs[0].id,...storeSnap.docs[0].data()} : state.myStore;
+  state.products.slice(0, 3).forEach((item) => {
+    const parentId = item.productId || item.id;
+    void hydrateFeatureResource(item, "market_product", "products", parentId);
+  });
 }
 
 async function loadBusinessWorkspace() {
@@ -502,8 +666,12 @@ async function loadBusinessWorkspace() {
 async function loadNotifications() {
   try {
     const s = await getDocs(query(collection(db,"notifications"), where("recipientUid","==",state.user.uid), limit(40)));
-    state.notifications = s.docs.map((d) => ({id:d.id,...d.data()})).sort((a,b) => stamp(b.createdAt) - stamp(a.createdAt));
-    state.unreadNotifications = state.notifications.filter((n) => !n.read && !n.isRead && !n.readAt).length;
+    state.notifications = s.docs.map((d) => ({id:d.id,...d.data()}))
+      .filter((n) => !n.dismissedAt && n.status !== "dismissed")
+      .sort((a,b) => stamp(b.createdAt) - stamp(a.createdAt));
+    state.unreadNotifications = state.notifications.filter((n) =>
+      !n.read && !n.isRead && !n.readAt
+    ).length;
   } catch {
     try { const r = await api.getMyNotificationSummary(); state.unreadNotifications = Number(r?.unreadCount || 0); } catch { state.unreadNotifications = 0; }
     state.notifications = [];
@@ -518,19 +686,20 @@ function categoryChips(kind, selected) {
 }
 
 function momentCard(m, own = false) {
-  const label = own ? "Your Moment" : (m.authorSnapshot?.displayName || m.author?.displayName || m.displayName || m.username || "Following");
-  return `<button class="moment-card ${own ? "own" : ""}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring"><div class="moment-avatar">${avatar(m.authorSnapshot || m.author || m,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
+  const author = authorFor(m);
+  const label = own ? "Your Moment" : (author.displayName || author.username || "Following");
+  return `<button class="moment-card ${own ? "own" : ""}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring"><div class="moment-avatar">${avatar(author,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
 }
 
 function renderHome() {
   const own = state.moments.find((m) => uidOf(m) === state.user.uid || m.uid === state.user.uid);
   const following = state.moments.filter((m) => m.id !== own?.id);
   const post = (p) => {
-    const author = p.authorSnapshot || p.author || p;
+    const author = authorFor(p);
     const urls = Array.isArray(p.mediaUrls) ? p.mediaUrls : [];
     const carouselIndex = urls.length ? Math.min(Math.max(0, Number(state.postCarouselIndex?.[p.id] || 0)), urls.length - 1) : 0;
     const activeMedia = urls[carouselIndex];
-    const mediaHtml = urls.length ? `<div class="post-media-carousel" data-post-carousel="${esc(p.id)}"><figure class="post-media-frame">${String(activeMedia?.contentType || "").startsWith("video/") ? `<video src="${esc(activeMedia.url)}" controls playsinline preload="metadata"></video>` : `<img src="${esc(activeMedia?.url || "")}" alt="Photo ${carouselIndex + 1} shared by ${esc(author.displayName || "a community member")}" loading="lazy" decoding="async">`}</figure>${urls.length > 1 ? `<div class="post-media-controls"><button type="button" data-action="post-media-prev" data-id="${esc(p.id)}" aria-label="Previous media">${icon("back",17)}</button><span>${carouselIndex + 1} / ${urls.length}</span><button type="button" data-action="post-media-next" data-id="${esc(p.id)}" aria-label="Next media">${icon("arrow",17)}</button></div>` : ""}</div>` : (Array.isArray(p.mediaIds) && p.mediaIds.length ? `<button class="media-placeholder" type="button" data-action="load-post-media" data-id="${esc(p.id)}">${icon("camera",17)}<span>Load ${p.mediaIds.length > 1 ? `${p.mediaIds.length} media items` : "media"}</span></button>` : "");
+    const mediaHtml = urls.length ? `<div class="post-media-carousel" data-post-carousel="${esc(p.id)}"><figure class="post-media-frame">${String(activeMedia?.contentType || "").startsWith("video/") ? `<video src="${esc(activeMedia.url)}" controls playsinline preload="metadata"></video>` : `<img src="${esc(activeMedia?.url || "")}" alt="Photo ${carouselIndex + 1} shared by ${esc(author.displayName || "a community member")}" loading="lazy" decoding="async">`}</figure>${urls.length > 1 ? `<div class="post-media-controls"><button type="button" data-action="post-media-prev" data-id="${esc(p.id)}" aria-label="Previous media">${icon("back",17)}</button><span>${carouselIndex + 1} / ${urls.length}</span><button type="button" data-action="post-media-next" data-id="${esc(p.id)}" aria-label="Next media">${icon("arrow",17)}</button></div>` : ""}</div>` : (Array.isArray(p.mediaIds) && p.mediaIds.length ? `<button class="media-placeholder" type="button" data-action="load-post-media" data-id="${esc(p.id)}">${p.mediaLoading ? `<span class="feed-spinner" aria-hidden="true"></span>` : icon("camera",17)}<span>${p.mediaLoading ? "Loading media…" : p.mediaLoadFailed ? "Retry media" : `Load ${p.mediaIds.length > 1 ? `${p.mediaIds.length} media items` : "media"}`}</span></button>` : "");
     const collapseAt = urls.length ? 180 : 520;
     const collapsible = String(p.text || "").length > collapseAt;
     const expanded = Boolean(state.captionExpanded?.[p.id]);
@@ -538,26 +707,78 @@ function renderHome() {
     return `<article class="post-card modern-post" data-post-id="${esc(p.id)}">
       <header class="post-head">${avatar(author,"md",true)}<div class="grow"><strong>${esc(author.displayName || "Community member")}</strong><span>${esc(author.username ? `@${author.username}` : "Community")} · ${when(p.createdAt)}</span></div>${uidOf(p) === state.user.uid ? `<button class="icon-btn" type="button" data-action="post-menu" data-id="${esc(p.id)}" aria-label="Post options">${icon("menuDots",19)}</button>` : `<button class="post-follow" type="button" data-action="${state.followingIds.includes(String(uidOf(p))) ? "unfollow-user" : "follow-user"}" data-id="${esc(uidOf(p))}" aria-label="${followLabel(uidOf(p))}">${followLabel(uidOf(p))}</button>`}</header>
       <div class="post-body">${mediaHtml}${p.text ? `<div class="post-caption"><p class="caption-text ${collapsible ? (expanded ? "caption-expanded" : captionClass) : ""}" data-caption-id="${esc(p.id)}">${esc(p.text)}</p>${collapsible ? `<button class="caption-toggle" type="button" data-action="toggle-caption" data-id="${esc(p.id)}">${expanded ? "Show less" : "Show more"}</button>` : ""}</div>` : ""}</div>
-      <footer class="post-actions"><button type="button" data-action="like-post" data-id="${esc(p.id)}">${icon("heart",18)}Like <span>${Number(p.reactionCount || 0) || ""}</span></button><button type="button" data-action="comment-post" data-id="${esc(p.id)}">${icon("comment",18)}Comment <span>${Number(p.commentCount || 0) || ""}</span></button><button type="button" data-action="save-post" data-id="${esc(p.id)}">${icon("bookmark",18)}Save</button><button type="button" data-action="share-post" data-id="${esc(p.id)}">${icon("arrow",18)}Share</button></footer>
+      <footer class="post-actions"><button class="${state.viewerLikedPosts[p.id] ? "is-liked" : ""}" type="button" data-action="like-post" data-id="${esc(p.id)}" aria-pressed="${Boolean(state.viewerLikedPosts[p.id])}">${icon("heart",18)}Like <span>${Number(p.reactionCount || 0) || ""}</span></button><button type="button" data-action="comment-post" data-id="${esc(p.id)}">${icon("comment",18)}Comment <span>${Number(p.commentCount || 0) || ""}</span></button><button class="${p.savedByViewer ? "is-saved" : ""}" type="button" data-action="save-post" data-id="${esc(p.id)}" aria-pressed="${Boolean(p.savedByViewer)}">${icon("bookmark",18)}${p.savedByViewer ? "Saved" : "Save"}</button><button type="button" data-action="share-post" data-id="${esc(p.id)}">${icon("arrow",18)}Share</button></footer>
     </article>`;
   };
+  if (state.savedView) {
+    return `<section class="screen home-screen saved-posts-screen">${head("YOUR LIBRARY","Saved posts","Posts you saved are kept here until you remove the bookmark.","home-feed-view","Back to Home")}<section class="section feed-section">${state.savedPosts.length ? state.savedPosts.map(post).join("") : (state.savedPostsLoading ? `<div class="comments-loading"><span class="feed-spinner" aria-hidden="true"></span><span>Loading saved posts…</span></div>` : emptyState("No saved posts yet","Use Save on a post to keep it in your Home library."))}<div class="feed-pagination">${state.savedPostsLoading ? `<span class="feed-spinner" aria-hidden="true"></span><span>Loading saved posts…</span>` : state.savedPostsHasMore ? `<button class="text-button" type="button" data-action="load-more-saved-posts">Load more saved posts</button>` : ""}</div></section></section>`;
+  }
   return `<section class="screen home-screen">
     <section class="home-moments"><div class="section-head compact"><div><span class="eyebrow">MOMENTS</span><h2>Stories & updates</h2></div><button class="text-button" type="button" data-action="create-moment">Create</button></div><div class="moments-row">${own ? momentCard(own,true) : `<button class="moment-card own" type="button" data-action="create-moment"><div class="moment-ring add-ring">${avatar(state.profile || state.user,"md",true)}<span class="add-badge">${icon("plus",13)}</span></div><span class="moment-label">Add a Moment</span></button>`}${following.map((m) => momentCard(m)).join("")}</div></section>
     ${contextualSearch("home-search-form","Search people and posts…","home",state.searchQuery)}
     ${state.homeSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">SEARCH</span><h2>Matches</h2></div><button class="text-button" type="button" data-action="clear-home-search">Clear</button></div><div class="results">${state.homeSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}
-    <section class="section feed-section"><div class="section-head compact"><div><span class="eyebrow">COMMUNITY FEED</span><h2>Latest updates</h2><small class="muted">People and public posts</small></div></div>${state.posts.length ? state.posts.map(post).join("") : emptyState("Your feed is quiet","Community updates will appear here.","create-post","Create a post")}<div id="home-feed-pagination" class="feed-pagination">${state.isLoadingMorePosts ? `<span class="feed-spinner" aria-hidden="true"></span><span>Loading more posts…</span>` : state.hasMorePosts ? `<span>Scroll to load more posts</span><button class="text-button" type="button" data-action="load-more-posts">Load more</button>` : `<span>${state.posts.length ? "You are all caught up." : ""}</span>`}</div></section>
+    <section class="section feed-section"><div class="section-head compact"><div><span class="eyebrow">COMMUNITY FEED</span><h2>Latest updates</h2><small class="muted">People and public posts</small></div><button class="text-button" type="button" data-action="show-saved-posts">Saved posts</button></div>${state.posts.length ? state.posts.map(post).join("") : emptyState("Your feed is quiet","Community updates will appear here.","create-post","Create a post")}<div id="home-feed-pagination" class="feed-pagination">${state.isLoadingMorePosts ? `<span class="feed-spinner" aria-hidden="true"></span><span>Loading more posts…</span>` : state.hasMorePosts ? `<span>Scroll to load more posts</span><button class="text-button" type="button" data-action="load-more-posts">Load more</button>` : `<span>${state.posts.length ? "You are all caught up." : ""}</span>`}</div></section>
     <button class="fab" type="button" data-action="create-menu" aria-label="Create"><span>${icon("plus",23)}</span></button>
   </section>`;
 }
 
 function renderChat() {
   if (state.activeThreadId) {
-    const t = state.threads.find((x) => x.id === state.activeThreadId) || {};
-    const p = peer(t);
-    return `<section class="screen conversation"><header class="conversation-head"><button class="icon-btn" type="button" data-action="close-thread" aria-label="Back">${icon("back")}</button>${avatar(p,"sm",true)}<div class="grow"><strong>${esc(p.displayName || p.username || "Conversation")}</strong><span>${esc(p.username ? `@${p.username}` : "Private conversation")}</span></div></header><div class="messages">${state.messages.length ? state.messages.map((m) => `<div class="message-row ${m.senderUid === state.user.uid ? "own" : ""}"><div class="bubble"><div>${esc(m.status === "deleted_for_everyone" ? "Message deleted" : (m.text || ""))}</div><small>${when(m.createdAt)}</small>${m.senderUid === state.user.uid && m.status !== "deleted_for_everyone" ? `<button class="message-more" type="button" data-action="delete-message" data-id="${esc(m.id)}">Delete</button>` : ""}</div></div>`).join("") : emptyState("Start the conversation","Send a message to begin.")}</div><form id="message-form" class="composer"><textarea name="text" rows="1" maxlength="4000" placeholder="Write a message…" required></textarea><button type="submit" aria-label="Send">${icon("send",20)}</button></form></section>`;
+    const thread = state.threads.find((item) => item.id === state.activeThreadId) || {};
+    const profile = peer(thread);
+    const pinned = Array.isArray(thread.pinnedUids) &&
+      thread.pinnedUids.includes(state.user.uid);
+    const messages = state.messages.map((message) => {
+      const own = message.senderUid === state.user.uid;
+      const deleted = message.status === "deleted_for_everyone";
+      return `<div class="message-row ${own ? "own" : ""}">
+        <div class="bubble">
+          <div class="message-text">${esc(deleted ? "This message was deleted for everyone." : (message.text || ""))}</div>
+          <small>${when(message.createdAt)}${message.editedAt ? " · edited" : ""}</small>
+          ${!deleted ? `<button class="message-options-button" type="button" data-action="message-options" data-id="${esc(message.id)}" aria-label="Message options">${icon("menuDots",16)}</button>` : ""}
+        </div>
+      </div>`;
+    }).join("");
+
+    return `<section class="screen conversation">
+      <header class="conversation-head">
+        <button class="icon-btn" type="button" data-action="close-thread" aria-label="Back to conversations">${icon("back",18)}</button>
+        ${avatar(profile,"sm",true)}
+        <div class="grow"><strong>${esc(profile.displayName || profile.username || "Conversation")}</strong><span>${esc(profile.username ? `@${profile.username}` : "Private conversation")}</span></div>
+        <button class="icon-btn" type="button" data-action="active-thread-menu" data-id="${esc(thread.id || state.activeThreadId)}" aria-label="Conversation options">${icon("menuDots",19)}</button>
+      </header>
+      <div class="messages" aria-live="polite" aria-label="Messages">
+        ${messages || emptyState("Start the conversation","Send a text message to begin.")}
+      </div>
+      <form id="message-form" class="composer" autocomplete="off">
+        <textarea name="text" rows="1" maxlength="4000" placeholder="Message…" aria-label="Write a text message" required></textarea>
+        <button type="submit" aria-label="Send message">${icon("send",20)}</button>
+      </form>
+    </section>`;
   }
-  const thread = (t) => { const p = peer(t); return `<button class="thread" type="button" data-action="open-thread" data-id="${esc(t.id)}">${avatar(p,"md",true)}<span class="thread-copy"><strong>${esc(p.displayName || p.username || "Conversation")}</strong><small>${esc(typeof t.lastMessage === "string" ? t.lastMessage : (t.lastMessage?.text || t.lastMessageText || "No messages yet"))}</small></span><span class="thread-meta">${when(t.lastMessageAt || t.updatedAt)}</span></button>`; };
-  return `<section class="screen chat-screen">${head("CONVERSATIONS","Chat","Private conversations with people you choose.","focus-chat-search","New chat")}${contextualSearch("chat-person-search-form","Search exact username…","users",state.chatSearchQuery)}${state.chatSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">PEOPLE</span><h2>Search results</h2></div><button class="text-button" type="button" data-action="clear-chat-search">Clear</button></div><div class="results">${state.chatSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}<div class="threads">${state.threads.length ? state.threads.map(thread).join("") : emptyState("No conversations yet","Search an exact username above to start a conversation.")}</div></section>`;
+
+  const threadRow = (thread) => {
+    const profile = peer(thread);
+    const pinned = Array.isArray(thread.pinnedUids) &&
+      thread.pinnedUids.includes(state.user.uid);
+    const preview = typeof thread.lastMessage === "string" ? thread.lastMessage :
+      (thread.lastMessage?.text || thread.lastMessageText || "No messages yet");
+    return `<div class="thread-row ${pinned ? "is-pinned" : ""}">
+      <button class="thread" type="button" data-action="open-thread" data-id="${esc(thread.id)}">
+        ${avatar(profile,"md",true)}
+        <span class="thread-copy"><strong>${esc(profile.displayName || profile.username || "Conversation")} ${pinned ? `<span class="thread-pinned">Pinned</span>` : ""}</strong><small>${esc(preview)}</small></span>
+        <span class="thread-meta">${when(thread.lastMessageAt || thread.updatedAt)}</span>
+      </button>
+      <button class="icon-btn thread-options" type="button" data-action="thread-menu" data-id="${esc(thread.id)}" aria-label="Options for conversation with ${esc(profile.displayName || profile.username || "member")}">${icon("menuDots",19)}</button>
+    </div>`;
+  };
+
+  return `<section class="screen chat-screen">
+    ${head("CONVERSATIONS","Chat","Private text conversations with people you choose.","focus-chat-search","New chat")}
+    ${contextualSearch("chat-person-search-form","Search exact username…","users",state.chatSearchQuery)}
+    ${state.chatSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">PEOPLE</span><h2>Search results</h2></div><button class="text-button" type="button" data-action="clear-chat-search">Clear</button></div><div class="results">${state.chatSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}
+    <div class="threads">${state.threads.length ? state.threads.map(threadRow).join("") : emptyState("No conversations yet","Search an exact username above to start a conversation.")}</div>
+  </section>`;
 }
 
 function renderSkills() {
@@ -567,7 +788,7 @@ function renderSkills() {
     if (!q) return true;
     return [item.title, item.description, item.categoryId, ...(item.tags || [])].join(" ").toLowerCase().includes(q);
   });
-  const card = (item) => `<article class="listing-card"><div class="listing-icon">${icon("skills",20)}</div><div class="grow"><span class="eyebrow">SERVICE</span><h3>${esc(item.title || "Skill listing")}</h3><p>${esc(item.description || "")}</p><div class="tags">${(item.tags || []).slice(0,4).map((tag) => `<span>${esc(tag)}</span>`).join("")}</div><small class="muted">${money(item.priceFromMinor,item.currency || "NGN")}</small></div><button class="btn btn-secondary" type="button" data-action="skill-view" data-id="${esc(item.id)}">View</button></article>`;
+  const card = (item) => `<article class="listing-card skill-listing-card">${item.mediaUrls?.[0]?.url ? `<img class="listing-photo" src="${esc(item.mediaUrls[0].url)}" alt="${esc(item.title || "Skill service")}" loading="lazy" decoding="async">` : `<div class="listing-icon">${icon("skills",20)}</div>`}<div class="grow"><span class="eyebrow">SERVICE</span><h3>${esc(item.title || "Skill listing")}</h3><p class="provider-byline">Provided by <strong>${esc(item.providerProfile?.displayName || item.providerProfile?.username || "Marvel Skills provider")}</strong>${item.providerProfile?.username ? ` · @${esc(item.providerProfile.username)}` : ""}</p><p>${esc(item.description || "")}</p><div class="tags">${(item.tags || []).slice(0,4).map((tag) => `<span>${esc(tag)}</span>`).join("")}</div><small class="muted">${money(item.priceFromMinor,item.currency || "NGN")}</small></div><button class="btn btn-secondary" type="button" data-action="skill-view" data-id="${esc(item.id)}">View</button></article>`;
   return `<section class="screen skills-screen">${head("DISCOVERY","Marvel Skills","Discover services and providers.")}${contextualSearch("skills-search-form","Search services or providers…","skills",state.skillsSearchQuery)}<section class="section"><div class="section-head compact"><div><span class="eyebrow">CATEGORIES</span><h2>Explore skills</h2></div>${state.skillProfile ? `<button class="text-button" type="button" data-action="route-skill-profile">My Skills</button>` : ""}</div>${categoryChips("skills",state.skillCategory || "all")}</section><section class="section"><div class="listing-grid">${filtered.length ? filtered.map(card).join("") : emptyState("No services here yet","Try another category or search phrase when new listings are available.")}</div></section></section>`;
 }
 
@@ -580,7 +801,7 @@ function renderSkillProfile() {
 
 function renderMarket() {
   const filtered = state.products.filter((item) => categoryMatches(item.result || item, state.marketCategory || "all"));
-  const card = (item) => { const p = item.result || item; return `<article class="product-card" data-action="market-view" data-id="${esc(item.id || p.id || "")}" tabindex="0"><div class="product-cover"><div class="product-cover-icon">${icon("market",24)}</div></div><div class="product-info"><span class="eyebrow">PRODUCT</span><h3>${esc(p.title || item.title || "Product")}</h3><p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong></div></article>`; };
+  const card = (item) => { const p = item.result || item; const image = (p.mediaUrls || item.mediaUrls || [])[0]; return `<article class="product-card" data-action="market-view" data-id="${esc(item.productId || item.id || p.id || "")}" tabindex="0"><div class="product-cover">${image?.url ? `<img src="${esc(image.url)}" alt="${esc(p.title || item.title || "Product photo")}" loading="lazy" decoding="async">` : `<div class="product-cover-icon">${icon("market",24)}</div>`}</div><div class="product-info"><span class="eyebrow">PRODUCT</span><h3>${esc(p.title || item.title || "Product")}</h3><p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong><small class="muted">${esc(p.store?.name || "Marvel Market seller")}</small></div></article>`; };
   return `<section class="screen market-screen">${head("DISCOVERY","Marvel Market","Discover products from real storefronts.",state.myStore ? "route-business" : "",state.myStore ? "My Shop" : "")}${contextualSearch("market-form","Search products and shops…","market",state.searchQuery)}<div class="market-powered">Powered by Davonium Technologies</div><section class="section"><div class="section-head compact"><div><span class="eyebrow">CATEGORIES</span><h2>Browse categories</h2></div></div>${categoryChips("market",state.marketCategory || "all")}</section><section class="section"><div class="product-grid">${filtered.length ? filtered.map(card).join("") : emptyState("Nothing to show yet","Try another category or search phrase.")}</div></section></section>`;
 }
 
@@ -596,29 +817,45 @@ function renderBusiness() {
 function renderSellerOnboarding() {
   const step = state.sellerOnboardingStep;
   const d = state.sellerDraft;
-  const steps = ["Welcome","Standards","Agreement","Details"];
+  const steps = ["Welcome","Standards","Agreement","Store identity","Catalog","Fulfilment","Customer care","Review"];
   const pages = [
-    ["Build your storefront","Create the business identity customers will see.","shop"],
-    ["Seller standards","Use accurate descriptions, truthful availability, and responsible customer communication.","shield"],
-    ["Marketplace agreement","Accept the marketplace responsibilities before creating the real store.","file"],
-    ["Business details","Add the name, description, category, and location customers will see.","edit"]
+    ["Build your storefront","Create a consistent business identity before publishing products.","shop"],
+    ["Seller standards","Use original or authorized images, accurate descriptions, truthful stock, fair communication and lawful products.","shield"],
+    ["Marketplace agreement","Accept the seller responsibilities. Marvel Chat does not promise escrow, payments or refunds unless those features are separately provided.","file"],
+    ["Store identity","Choose a clear business name, category and location customers can understand.","edit"],
+    ["Product catalogue","Prepare real photos, complete descriptions, valid prices and stock counts. At least one photo is required for each new product.","market"],
+    ["Fulfilment and availability","Keep availability current and communicate delivery or collection terms honestly. Do not mark requests complete before fulfilment.","check"],
+    ["Customer care","Respond respectfully, protect customer information, and use reporting/feedback tools when an issue needs attention.","message"],
+    ["Review your store","Confirm your public details are accurate. The store will be created after you complete this step.","check"]
   ];
-  const p = pages[step];
-  return `<section class="screen onboarding-screen"><div class="onboarding-shell"><div class="page-back-wrap"><button class="page-back" type="button" data-action="route-profile" aria-label="Back to Profile">${icon("back",18)}<span>Back to Profile</span></button></div><div class="stepper">${steps.map((x,i) => `<span class="step-dot ${i <= step ? "active" : ""}">${i < step ? icon("check",13) : i+1}</span>${i < steps.length-1 ? `<i class="step-line ${i < step ? "active" : ""}"></i>` : ""}`).join("")}</div><div class="onboarding-card"><div class="onboarding-icon">${icon(p[2],26)}</div><span class="eyebrow">${esc(steps[step])}</span><h1>${esc(p[0])}</h1><p class="onboarding-copy">${esc(p[1])}</p>${step === 2 ? `<label class="agree-row large"><input type="checkbox" id="seller-agreement" ${d.agreed ? "checked" : ""}><span>I accept the seller standards and marketplace responsibilities.</span></label>` : ""}${step === 3 ? `<form id="seller-details-form" class="form-stack compact-form"><label class="floating-field"><input name="name" value="${esc(d.name || "")}" maxlength="120" required><span>Business name</span></label><label class="floating-field"><textarea name="description" maxlength="1000">${esc(d.description || "")}</textarea><span>Business description</span></label><label class="floating-field"><input name="category" value="${esc(d.category || "")}" maxlength="100" placeholder=" "><span>Business category</span></label><label class="floating-field"><input name="location" value="${esc(d.location || "")}" maxlength="200" placeholder=" "><span>Business location</span></label></form>` : ""}<div class="onboarding-actions"><button class="btn btn-secondary" type="button" data-action="onboarding-back" ${step===0 ? "disabled" : ""}>Back</button><button class="btn btn-primary" type="button" data-action="onboarding-next">${step===3 ? (d.storeId ? "Update store" : "Create store") : "Continue"}</button></div></div><button class="text-button" type="button" data-action="route-business">Exit setup</button></div></section>`;
+  const page = pages[step] || pages[0];
+  const details = step === 3 || step === 7 ? `<form id="seller-details-form" class="form-stack compact-form"><label class="floating-field"><input name="name" value="${esc(d.name || "")}" maxlength="120" required placeholder=" "><span>Business name</span></label><label class="floating-field"><textarea name="description" maxlength="1000" placeholder=" ">${esc(d.description || "")}</textarea><span>Business description</span></label><label class="floating-field"><input name="category" value="${esc(d.category || "")}" maxlength="100" placeholder=" "><span>Business category</span></label><label class="floating-field"><input name="location" value="${esc(d.location || "")}" maxlength="200" placeholder=" "><span>Business location</span></label></form>` : "";
+  const agreement = step === 2 ? `<label class="agree-row large"><input type="checkbox" id="seller-agreement" ${d.agreed ? "checked" : ""}><span>I accept the seller standards and marketplace responsibilities.</span></label>` : "";
+  return `<section class="screen onboarding-screen"><div class="onboarding-shell"><div class="page-back-wrap"><button class="page-back" type="button" data-action="route-profile" aria-label="Back to Profile">${icon("back",18)}<span>Back to Profile</span></button></div><div class="stepper">${steps.map((x,i) => `<span class="step-dot ${i <= step ? "active" : ""}">${i < step ? icon("check",13) : i+1}</span>${i < steps.length-1 ? `<i class="step-line ${i < step ? "active" : ""}"></i>` : ""}`).join("")}</div><div class="onboarding-card"><div class="onboarding-icon">${icon(page[2],26)}</div><span class="eyebrow">STEP ${step+1} OF ${steps.length} · ${esc(steps[step])}</span><h1>${esc(page[0])}</h1><p class="onboarding-copy">${esc(page[1])}</p>${agreement}${details}<div class="onboarding-actions"><button class="btn btn-secondary" type="button" data-action="onboarding-back" ${step===0 ? "disabled" : ""}>Back</button><button class="btn btn-primary" type="button" data-action="onboarding-next">${step===steps.length-1 ? (d.storeId ? "Save store" : "Create store") : "Continue"}</button></div></div><button class="text-button" type="button" data-action="route-business">Exit setup</button></div></section>`;
 }
+
+
 
 function renderSkillOnboarding() {
   const step = state.skillOnboardingStep;
   const d = state.skillDraft;
-  const steps = ["Profile","Experience","Service","Review"];
-  const page = [["Provider account","Create the professional identity behind your Skills services.","profile"],["Your experience","Describe your strengths, location, remote availability, and experience.","spark"],["Your first service","Create the first service that will appear in Marvel Skills.","skills"],["Review","Check your provider profile and service before publishing.","check"]][step];
+  const steps = ["Welcome", "Profile", "Experience", "Service", "Review"];
+  const pages = [
+    ["How Marvel Skills works", "Create a clear provider identity, publish a truthful service listing, and respond to requests professionally. Listings and images use your shared 2 MiB daily media allowance.", "skills"],
+    ["Provider profile", "Tell members who you are and the work you provide.", "profile"],
+    ["Your experience", "Describe your strengths, location, remote availability, and experience.", "spark"],
+    ["Your first service", "Prepare the first service that will appear in Marvel Skills.", "skills"],
+    ["Review and publish", "Check your provider profile and service information before publishing.", "check"],
+  ];
+  const page = pages[step] || pages[0];
   const categoryOptions = (state.skillCategories.length ? state.skillCategories.map((c) => [c.id,c.name || c.id]) : SKILL_CATEGORIES.filter((x) => x[0] !== "all"));
   let form = "";
-  if (step === 0) form = `<form id="skill-details-form" class="form-stack compact-form"><label class="floating-field"><input name="headline" maxlength="180" value="${esc(d.headline || "")}" required><span>Professional headline</span></label><label class="floating-field"><textarea name="bio" maxlength="2000" required>${esc(d.bio || "")}</textarea><span>Professional bio</span></label></form>`;
-  if (step === 1) form = `<form id="skill-details-form" class="form-stack compact-form"><label class="floating-field"><input name="locationText" maxlength="160" value="${esc(d.locationText || "")}" placeholder=" "><span>Location</span></label><label class="select-field"><span>Remote availability</span><select name="remote"><option value="true" ${d.remote !== false ? "selected" : ""}>Remote available</option><option value="false" ${d.remote === false ? "selected" : ""}>On location</option></select></label><label class="floating-field"><input name="yearsExperience" type="number" min="0" max="80" value="${Number(d.yearsExperience || 0)}" required><span>Years of experience</span></label></form>`;
-  if (step === 2) form = `<form id="skill-details-form" class="form-stack compact-form"><label class="select-field"><span>Primary category</span><select name="category" required>${categoryOptions.map(([id,label]) => `<option value="${esc(id)}" ${d.category === id ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label><label class="floating-field"><input name="listingTitle" maxlength="160" value="${esc(d.listingTitle || "")}" required><span>Service title</span></label><label class="floating-field"><textarea name="listingDescription" maxlength="3000" required>${esc(d.listingDescription || "")}</textarea><span>Service description</span></label><label class="floating-field"><input name="priceFromMinor" type="number" min="0" value="${esc(d.priceFromMinor || "")}" placeholder=" "><span>Starting price (minor units)</span></label><label class="floating-field"><input name="deliveryTimeDays" type="number" min="1" max="365" value="${esc(d.deliveryTimeDays || "")}" placeholder=" "><span>Delivery time in days</span></label><label class="floating-field"><input name="tags" maxlength="500" value="${esc(d.tags || "")}" placeholder=" "><span>Tags, comma separated</span></label></form>`;
-  if (step === 3) form = `<div class="review-card"><strong>${esc(d.headline || "Provider")}</strong><p>${esc(d.bio || "")}</p><span>${esc(d.category || "No category")}</span><p>${esc(d.listingTitle || "No listing title")}</p><small>${esc(d.listingDescription || "")}</small></div>`;
-  return `<section class="screen onboarding-screen"><div class="onboarding-shell"><div class="page-back-wrap"><button class="page-back" type="button" data-action="route-profile" aria-label="Back to Profile">${icon("back",18)}<span>Back to Profile</span></button></div><div class="stepper">${steps.map((x,i) => `<span class="step-dot ${i <= step ? "active" : ""}">${i < step ? icon("check",13) : i+1}</span>${i < steps.length-1 ? `<i class="step-line ${i < step ? "active" : ""}"></i>` : ""}`).join("")}</div><div class="onboarding-card"><div class="onboarding-icon">${icon(page[2],26)}</div><span class="eyebrow">${esc(steps[step])}</span><h1>${esc(page[0])}</h1><p class="onboarding-copy">${esc(page[1])}</p>${form}<div class="onboarding-actions"><button class="btn btn-secondary" type="button" data-action="skill-onboarding-back" ${step===0 ? "disabled" : ""}>Back</button><button class="btn btn-primary" type="button" data-action="skill-onboarding-next">${step===3 ? "Publish profile + listing" : "Continue"}</button></div></div><button class="text-button" type="button" data-action="route-skill-profile">Exit setup</button></div></section>`;
+  const agreement = step === 0 ? `<div class="onboarding-note"><p>Marvel Skills helps members discover service providers. You are responsible for accurate descriptions, lawful work, fair communication and protecting customer information.</p><label class="agree-row large"><input type="checkbox" id="skill-provider-agreement" ${d.agreed ? "checked" : ""}><span>I understand the provider responsibilities and agree to follow the Community Guidelines.</span></label></div>` : "";
+  if (step === 1) form = `<form id="skill-details-form" class="form-stack compact-form"><label class="floating-field"><input name="headline" maxlength="180" value="${esc(d.headline || "")}" required placeholder=" "><span>Professional headline</span></label><label class="floating-field"><textarea name="bio" maxlength="2000" required placeholder=" ">${esc(d.bio || "")}</textarea><span>Professional bio</span></label></form>`;
+  if (step === 2) form = `<form id="skill-details-form" class="form-stack compact-form"><label class="floating-field"><input name="locationText" maxlength="160" value="${esc(d.locationText || "")}" placeholder=" "><span>Location</span></label><label class="select-field"><span>Remote availability</span><select name="remote"><option value="true" ${d.remote !== false && d.remote !== "false" ? "selected" : ""}>Remote available</option><option value="false" ${d.remote === false || d.remote === "false" ? "selected" : ""}>On location</option></select></label><label class="floating-field"><input name="yearsExperience" type="number" min="0" max="80" value="${Number(d.yearsExperience || 0)}" required placeholder=" "><span>Years of experience</span></label></form>`;
+  if (step === 3) form = `<form id="skill-details-form" class="form-stack compact-form"><label class="select-field"><span>Primary category</span><select name="category" required>${categoryOptions.map(([id,label]) => `<option value="${esc(id)}" ${d.category === id ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label><label class="floating-field"><input name="listingTitle" maxlength="160" value="${esc(d.listingTitle || "")}" required placeholder=" "><span>Service title</span></label><label class="floating-field"><textarea name="listingDescription" maxlength="3000" required placeholder=" ">${esc(d.listingDescription || "")}</textarea><span>Service description</span></label><label class="photo-pick">${icon("camera",20)}<span><strong>Service photo (optional)</strong><small>Optimized image · shared daily allowance</small></span><input id="skill-onboarding-photo" name="listingPhoto" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label><div id="skill-onboarding-photo-preview" class="post-photo-preview"></div><label class="floating-field"><input name="priceFromMinor" type="number" min="0" value="${esc(d.priceFromMinor || "")}" placeholder=" "><span>Starting price (minor units)</span></label><label class="floating-field"><input name="deliveryTimeDays" type="number" min="1" max="365" value="${esc(d.deliveryTimeDays || "")}" placeholder=" "><span>Delivery time in days</span></label><label class="floating-field"><input name="tags" maxlength="500" value="${esc(d.tags || "")}" placeholder=" "><span>Tags, comma separated</span></label></form>`;
+  if (step === 4) form = `<div class="review-card"><strong>${esc(d.headline || "Provider")}</strong><p>${esc(d.bio || "")}</p><span>${esc(d.category || "No category")}</span><p>${esc(d.listingTitle || "No listing title")}</p><small>${esc(d.listingDescription || "")}</small>${state.pendingSkillPhoto ? `<p class="muted">A service photo is selected and will count toward today's shared allowance.</p>` : ""}</div>`;
+  return `<section class="screen onboarding-screen"><div class="onboarding-shell"><div class="page-back-wrap"><button class="page-back" type="button" data-action="route-profile" aria-label="Back to Profile">${icon("back",18)}<span>Back to Profile</span></button></div><div class="stepper">${steps.map((x,i) => `<span class="step-dot ${i <= step ? "active" : ""}">${i < step ? icon("check",13) : i+1}</span>${i < steps.length-1 ? `<i class="step-line ${i < step ? "active" : ""}"></i>` : ""}`).join("")}</div><div class="onboarding-card"><div class="onboarding-icon">${icon(page[2],26)}</div><span class="eyebrow">STEP ${step+1} OF ${steps.length} · ${esc(steps[step])}</span><h1>${esc(page[0])}</h1><p class="onboarding-copy">${esc(page[1])}</p>${agreement}${form}<div class="onboarding-actions"><button class="btn btn-secondary" type="button" data-action="skill-onboarding-back" ${step===0 ? "disabled" : ""}>Back</button><button class="btn btn-primary" type="button" data-action="skill-onboarding-next">${step===4 ? "Publish profile + listing" : "Continue"}</button></div></div><button class="text-button" type="button" data-action="route-skill-profile">Exit setup</button></div></section>`;
 }
 
 function renderProfile() {
@@ -743,13 +980,31 @@ const viewMap = {
 };
 
 function paint() {
+  const previousRoot = document.querySelector(".main-scroll");
+  if (state.renderedRoute && previousRoot) {
+    state.scrollPositions[state.renderedRoute] = previousRoot.scrollTop;
+  }
+  const version = (state.paintVersion || 0) + 1;
+  state.paintVersion = version;
   if (state.route === "legal") {
     app.innerHTML = state.user ? shell(renderLegal(), false) : renderLegal();
+    state.renderedRoute = state.route;
     return;
   }
-  if (!state.user) { app.innerHTML = authScreen(); return; }
+  if (!state.user) {
+    app.innerHTML = authScreen();
+    state.renderedRoute = state.route;
+    return;
+  }
   app.innerHTML = shell((viewMap[state.route] || renderHome)(), state.route === "chat" && Boolean(state.activeThreadId));
+  state.renderedRoute = state.route;
   setupFeedPagination();
+  setupLazyPostMedia();
+  requestAnimationFrame(() => {
+    if (version !== state.paintVersion) return;
+    const root = document.querySelector(".main-scroll");
+    if (root) root.scrollTop = Number(state.scrollPositions[state.route] || 0);
+  });
 }
 
 async function refreshRouteData(route) {
@@ -794,16 +1049,66 @@ async function signup(form) {
 function openCreatePost() {
   state.pendingMediaFile = null;
   state.pendingMediaFiles = [];
-  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add photos or a video</strong><small>Up to 10 media items · photos/videos are optimized automatically · 2 MiB total daily allowance</small></span><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple></label><div id="post-media-preview" class="post-media-picker"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
+  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add photos or a video</strong><small>Up to 10 media items · photos/videos are optimized automatically · shared 2 MiB daily allowance</small></span><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple></label><div id="post-media-preview" class="post-media-picker"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
 }
 
 function openCreateMoment() {
   state.pendingMomentFile = null;
-  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo or video</option><option value="photo_text">Photo/video + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add a photo or video</strong><small>One media item · optimized automatically · included in your 2 MiB daily allowance</small></span><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime"></label><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
+  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo or video</option><option value="photo_text">Photo/video + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add a photo or video</strong><small>One media item · optimized automatically · included in your shared 2 MiB daily allowance</small></span><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime"></label><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
 }
 
-function openComment(postId) {
-  modal("Add a comment",`<form id="comment-form" class="form-stack compact-form"><input type="hidden" name="postId" value="${esc(postId)}"><label class="floating-field"><textarea name="text" maxlength="1000" required placeholder=" "></textarea><span>Your comment</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-comment">Comment</button>`);
+function renderCommentPanel(postId) {
+  const comments = state.commentsByPost[postId] || [];
+  const loading = Boolean(state.commentLoadingByPost[postId]);
+  const hasMore = Boolean(state.commentHasMoreByPost[postId]);
+  const rows = comments.map((comment) => {
+    const author = comment.authorSnapshot || {};
+    const name = author.displayName || author.username || "Community member";
+    return `<article class="comment-row"><div class="comment-avatar">${avatar(author,"sm",true)}</div><div class="comment-content"><strong>${esc(name)}${author.username ? ` <small>@${esc(author.username)}</small>` : ""}</strong><p>${esc(comment.text || "")}</p><small class="muted">${when(comment.createdAt)}</small></div></article>`;
+  }).join("");
+  return `<div class="comments-panel"><div class="comments-list">${rows || (loading ? `<div class="comments-loading"><span class="feed-spinner" aria-hidden="true"></span><span>Loading comments…</span></div>` : emptyState("No comments yet","Be the first to join the conversation."))}</div>${loading && comments.length ? `<div class="comments-loading"><span class="feed-spinner" aria-hidden="true"></span><span>Loading…</span></div>` : ""}${hasMore ? `<button class="btn btn-secondary btn-block" type="button" data-action="load-more-comments" data-id="${esc(postId)}" ${loading ? "disabled" : ""}>${loading ? "Loading…" : "Load older comments"}</button>` : ""}<form id="comment-form" class="form-stack compact-form"><input type="hidden" name="postId" value="${esc(postId)}"><label class="floating-field"><textarea name="text" maxlength="1000" minlength="1" required placeholder=" "></textarea><span>Write a comment</span></label></form></div>`;
+}
+
+async function loadPostComments(postId, append = false) {
+  if (!postId || state.commentLoadingByPost[postId]) return;
+  state.commentLoadingByPost[postId] = true;
+  if (!append) {
+    state.commentsByPost[postId] = [];
+    state.commentCursorByPost[postId] = null;
+    state.commentHasMoreByPost[postId] = false;
+  }
+  try {
+    const result = await api.getPostComments({
+      postId,
+      limit: 10,
+      cursor: append ? state.commentCursorByPost[postId] : null,
+    });
+    const received = Array.isArray(result?.comments) ? result.comments : [];
+    const prior = append ? (state.commentsByPost[postId] || []) : [];
+    const seen = new Set(prior.map((comment) => comment.id));
+    const unique = received.filter((comment) => !seen.has(comment.id));
+    state.commentsByPost[postId] = [...prior, ...unique];
+    state.commentCursorByPost[postId] = result?.nextCursor || null;
+    state.commentHasMoreByPost[postId] = Boolean(result?.nextCursor);
+  } finally {
+    state.commentLoadingByPost[postId] = false;
+  }
+}
+
+async function openComment(postId) {
+  state.activeCommentPostId = postId;
+  state.commentsByPost[postId] = [];
+  state.commentCursorByPost[postId] = null;
+  state.commentHasMoreByPost[postId] = false;
+  state.commentLoadingByPost[postId] = true;
+  modal("Comments", renderCommentPanel(postId), `<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-primary" type="button" data-action="submit-comment">Comment</button>`, {wide:true});
+  try {
+    await loadPostComments(postId, false);
+  } catch (error) {
+    toast(friendlyError(error), "error");
+    return;
+  }
+  modal("Comments", renderCommentPanel(postId), `<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-primary" type="button" data-action="submit-comment">Comment</button>`, {wide:true});
 }
 
 function openSkillListing(listing) {
@@ -813,24 +1118,27 @@ function openSkillListing(listing) {
 
 function openMarketProduct(item) {
   const p = item.result || item;
-  modal(p.title || "Product",`<div class="detail"><div class="product-detail-icon">${icon("market",30)}</div><p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong><small class="muted">${esc(p.status || "available")}</small></div><form id="purchase-form" class="form-stack compact-form"><input type="hidden" name="productId" value="${esc(p.id || item.id || "")}"><input type="hidden" name="storeId" value="${esc(p.storeId || "")}"><label class="floating-field"><input name="quantity" type="number" min="1" max="1000" value="1" required><span>Quantity</span></label><label class="floating-field"><textarea name="customerNote" maxlength="1000" placeholder=" "></textarea><span>Note to seller (optional)</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-primary" type="button" data-action="submit-purchase">Send request</button>`,{wide:true});
+  modal(p.title || "Product",`<div class="detail">${(p.mediaUrls || item.mediaUrls || []).slice(0,8).map((media) => `<img class="detail-media-image" src="${esc(media.url)}" alt="${esc(p.title || "Product photo")}" loading="lazy">`).join("") || `<div class="product-detail-icon">${icon("market",30)}</div>`}<p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong><small class="muted">${esc(p.status || "available")}</small></div><form id="purchase-form" class="form-stack compact-form"><input type="hidden" name="productId" value="${esc(p.productId || item.productId || p.id || item.id || "")}"><input type="hidden" name="storeId" value="${esc(p.storeId || "")}"><label class="floating-field"><input name="quantity" type="number" min="1" max="1000" value="1" required><span>Quantity</span></label><label class="floating-field"><textarea name="customerNote" maxlength="1000" placeholder=" "></textarea><span>Note to seller (optional)</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-primary" type="button" data-action="submit-purchase">Send request</button>`,{wide:true});
 }
 
 function openProfileEdit() {
   const p = state.profile || {};
-  modal("Edit profile",`<form id="profile-form" class="form-stack compact-form"><label class="floating-field"><input name="displayName" maxlength="80" value="${esc(p.displayName || state.user?.displayName || "")}" required placeholder=" "><span>Full name</span></label><label class="floating-field"><input name="username" maxlength="30" value="${esc(p.username || "")}" required placeholder=" "><span>Username</span></label><label class="floating-field"><textarea name="bio" maxlength="500" placeholder=" ">${esc(p.bio || "")}</textarea><span>Bio</span></label><label class="floating-field"><input name="location" maxlength="200" value="${esc(p.location || "")}" placeholder=" "><span>Location</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-profile">Save changes</button>`);
+  state.pendingProfilePhoto = null;
+  modal("Edit profile",`<form id="profile-form" class="form-stack compact-form"><label class="photo-pick">${avatar(p,"md",true)}<span><strong>Profile photo</strong><small>Square images are optimized. Shared allowance: 2 MiB per UTC day across Marvel Chat.</small></span><input id="profile-photo" name="profilePhoto" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label><div id="profile-photo-preview" class="post-photo-preview"></div><label class="floating-field"><input name="displayName" maxlength="80" value="${esc(p.displayName || state.user?.displayName || "")}" required placeholder=" "><span>Full name</span></label><label class="floating-field"><input name="username" maxlength="30" value="${esc(p.username || "")}" required placeholder=" "><span>Username</span></label><label class="floating-field"><textarea name="bio" maxlength="500" placeholder=" ">${esc(p.bio || "")}</textarea><span>Bio</span></label><label class="floating-field"><input name="location" maxlength="200" value="${esc(p.location || "")}" placeholder=" "><span>Location</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-profile">Save changes</button>`);
 }
 
 function openSkillListingEditor(listing = null) {
   const s = listing || {};
   const categoryOptions = state.skillCategories.length ? state.skillCategories.map((c) => [c.id,c.name || c.id]) : SKILL_CATEGORIES.filter((x) => x[0] !== "all");
-  modal(listing ? "Edit service" : "Create service",`<form id="skill-listing-form" class="form-stack compact-form"><label class="floating-field"><input name="title" maxlength="160" value="${esc(s.title || "")}" required placeholder=" "><span>Service title</span></label><label class="floating-field"><textarea name="description" maxlength="3000" required placeholder=" ">${esc(s.description || "")}</textarea><span>Description</span></label><label class="select-field"><span>Category</span><select name="categoryId" required>${categoryOptions.map(([id,label]) => `<option value="${esc(id)}" ${s.categoryId === id ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label><label class="floating-field"><input name="priceFromMinor" type="number" min="0" value="${esc(s.priceFromMinor ?? "")}" placeholder=" "><span>Starting price (minor units)</span></label><label class="floating-field"><input name="deliveryTimeDays" type="number" min="1" max="365" value="${esc(s.deliveryTimeDays ?? "")}" placeholder=" "><span>Delivery time (days)</span></label><label class="floating-field"><input name="tags" maxlength="500" value="${esc((s.tags || []).join(", "))}" placeholder=" "><span>Tags, comma separated</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-skill-listing" data-id="${esc(s.id || "")}">${listing ? "Save changes" : "Publish listing"}</button>`,{wide:true});
+  state.pendingSkillPhoto = null;
+  modal(listing ? "Edit service" : "Create service",`<form id="skill-listing-form" class="form-stack compact-form"><label class="photo-pick">${icon("camera",20)}<span><strong>Service photo (optional)</strong><small>One optimized image · shared daily allowance</small></span><input id="skill-listing-photo" name="listingPhoto" type="file" accept="image/jpeg,image/png,image/webp,image/gif"></label><div id="skill-listing-photo-preview" class="post-photo-preview">${s.mediaIds?.length ? `<small class="muted">${s.mediaIds.length} saved service photo(s)</small>` : ""}</div><label class="floating-field"><input name="title" maxlength="160" value="${esc(s.title || "")}" required placeholder=" "><span>Service title</span></label><label class="floating-field"><textarea name="description" maxlength="3000" required placeholder=" ">${esc(s.description || "")}</textarea><span>Description</span></label><label class="select-field"><span>Category</span><select name="categoryId" required>${categoryOptions.map(([id,label]) => `<option value="${esc(id)}" ${s.categoryId === id ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label><label class="floating-field"><input name="priceFromMinor" type="number" min="0" value="${esc(s.priceFromMinor ?? "")}" placeholder=" "><span>Starting price (minor units)</span></label><label class="floating-field"><input name="deliveryTimeDays" type="number" min="1" max="365" value="${esc(s.deliveryTimeDays ?? "")}" placeholder=" "><span>Delivery time (days)</span></label><label class="floating-field"><input name="tags" maxlength="500" value="${esc((s.tags || []).join(", "))}" placeholder=" "><span>Tags, comma separated</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-skill-listing" data-id="${esc(s.id || "")}">${listing ? "Save changes" : "Publish listing"}</button>`,{wide:true});
 }
 
 function openProductEditor(product = null) {
   const p = product || {};
   const categoryOptions = state.marketCategories.length ? state.marketCategories.map((c) => [c.id,c.name || c.id]) : [];
-  modal(product ? "Edit product" : "Create product",`<form id="product-form" class="form-stack compact-form"><label class="floating-field"><input name="title" maxlength="200" value="${esc(p.title || "")}" required placeholder=" "><span>Product name</span></label><label class="floating-field"><textarea name="description" maxlength="3000" placeholder=" ">${esc(p.description || "")}</textarea><span>Description</span></label><label class="select-field"><span>Category</span><select name="categoryId"><option value="">No category</option>${categoryOptions.map(([id,label]) => `<option value="${esc(id)}" ${p.categoryId === id ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label><label class="floating-field"><input name="priceMinor" type="number" min="0" value="${esc(p.priceMinor ?? "0")}" required placeholder=" "><span>Price in minor units</span></label><label class="floating-field"><input name="currency" maxlength="3" value="${esc(p.currency || "NGN")}" required placeholder=" "><span>Currency</span></label><label class="floating-field"><input name="tags" maxlength="500" value="${esc((p.tags || []).join(", "))}" placeholder=" "><span>Tags, comma separated</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-product" data-id="${esc(p.id || "")}">${product ? "Save changes" : "Create product"}</button>`,{wide:true});
+  state.pendingProductPhoto = null;
+  modal(product ? "Edit product" : "Create product",`<form id="product-form" class="form-stack compact-form"><label class="photo-pick">${icon("camera",20)}<span><strong>Product photo${product && p.mediaIds?.length ? "" : " (required)"}</strong><small>At least one photo is required to publish a new product. Images count toward the shared daily allowance.</small></span><input id="product-photo" name="productPhoto" type="file" accept="image/jpeg,image/png,image/webp,image/gif" ${product && p.mediaIds?.length ? "" : "required"}></label><div id="product-photo-preview" class="post-photo-preview">${p.mediaIds?.length ? `<small class="muted">${p.mediaIds.length} saved product photo(s)</small>` : ""}</div><label class="floating-field"><input name="title" maxlength="200" value="${esc(p.title || "")}" required placeholder=" "><span>Product name</span></label><label class="floating-field"><textarea name="description" maxlength="3000" placeholder=" ">${esc(p.description || "")}</textarea><span>Description</span></label><label class="select-field"><span>Category</span><select name="categoryId"><option value="">No category</option>${categoryOptions.map(([id,label]) => `<option value="${esc(id)}" ${p.categoryId === id ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label><label class="floating-field"><input name="priceMinor" type="number" min="0" value="${esc(p.priceMinor ?? "0")}" required placeholder=" "><span>Price in minor units</span></label><label class="floating-field"><input name="currency" maxlength="3" value="${esc(p.currency || "NGN")}" required placeholder=" "><span>Currency</span></label><label class="floating-field"><input name="tags" maxlength="500" value="${esc((p.tags || []).join(", "))}" placeholder=" "><span>Tags, comma separated</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-product" data-id="${esc(p.id || "")}">${product ? "Save changes" : "Create product"}</button>`,{wide:true});
 }
 
 function openStoreEditor() {
@@ -907,11 +1215,39 @@ document.addEventListener("click", async (e) => {
     if (a === "post-menu") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Post options",`<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="edit-post" data-id="${esc(p.id)}">Edit post</button><button class="btn btn-secondary btn-block" type="button" data-action="delete-post" data-id="${esc(p.id)}">Delete post</button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`); return; }
     if (a === "edit-post") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Edit post",`<form id="edit-post-form" class="form-stack"><input type="hidden" name="postId" value="${esc(p.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(p.text || "")}</textarea><span>Post text</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${p.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${p.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${p.visibility === "private" ? "selected" : ""}>Private</option></select></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post">Save</button>`); return; }
     if (a === "submit-edit-post") { const d=Object.fromEntries(new FormData(document.getElementById("edit-post-form"))); await api.updatePost({postId:d.postId,text:String(d.text || "").trim(),visibility:d.visibility}); closeModal(); toast("Post updated.","success"); await loadHome({force:true}); paint(); return; }
-    if (a === "delete-post") { await api.deletePost({postId:actionEl.dataset.id}); closeModal(); toast("Post deleted.","success"); await loadHome({force:true}); paint(); return; }
-    if (a === "like-post") { const r=await api.reactToPost({postId:actionEl.dataset.id,type:"like"}); toast(r?.reacted === false ? "Like removed." : "Post liked.","success"); return; }
-    if (a === "save-post") { const r=await api.savePost({postId:actionEl.dataset.id}); toast(r?.saved === false ? "Post unsaved." : "Post saved.","success"); return; }
-    if (a === "comment-post") { openComment(actionEl.dataset.id); return; }
-    if (a === "submit-comment") { const d=Object.fromEntries(new FormData(document.getElementById("comment-form"))); await api.commentOnPost({postId:d.postId,text:String(d.text || "").trim()}); closeModal(); toast("Comment added.","success"); return; }
+    if (a === "delete-post") { const postId=actionEl.dataset.id; await api.deletePost({postId}); let cleanup=null; try { cleanup=await api.cleanupDeletedMedia({feature:"home_post",parentId:postId,parentCollection:"posts"}); } catch (error) { console.warn("[Marvel Chat] Deleted post media cleanup pending", error?.code || "unknown"); } closeModal(); toast(cleanup?.pendingIds?.length ? "Post deleted; some media cleanup needs retry." : "Post deleted.", cleanup?.pendingIds?.length ? "error" : "success"); await loadHome({force:true}); paint(); return; }
+    if (a === "show-saved-posts") { state.savedView = true; await loadSavedPosts(); return; }
+    if (a === "home-feed-view") { state.savedView = false; paint(); return; }
+    if (a === "load-more-saved-posts") { await loadSavedPosts({append:true}); return; }
+    if (a === "like-post") { const post=state.posts.find((item)=>item.id===actionEl.dataset.id);if(!post)return;const previous=Number(post.reactionCount||0);const r=await api.reactToPost({postId:post.id,type:"like"});const isLiked=typeof r?.reacted === "boolean" ? r.reacted : !state.viewerLikedPosts[post.id];state.viewerLikedPosts[post.id]=isLiked;post.reactionCount=Math.max(0,previous+(isLiked?1:-1));paint();toast(isLiked ? "Post liked." : "Like removed.","success"); return; }
+    if (a === "save-post") { const r=await api.savePost({postId:actionEl.dataset.id});const post=[...state.posts,...state.savedPosts].find((item)=>item.id===actionEl.dataset.id);if(post)post.savedByViewer=typeof r?.saved === "boolean" ? r.saved : !post.savedByViewer;if(state.savedView && post && !post.savedByViewer)state.savedPosts=state.savedPosts.filter((item)=>item.id!==post.id);paint();toast(post?.savedByViewer ? "Post saved." : "Post unsaved.","success"); return; }
+    if (a === "comment-post") { await openComment(actionEl.dataset.id); return; }
+    if (a === "load-more-comments") {
+      const postId = actionEl.dataset.id;
+      const editor = document.querySelector('#comment-form textarea[name="text"]');
+      const draft = editor ? editor.value : "";
+      try {
+        await loadPostComments(postId, true);
+        modal("Comments", renderCommentPanel(postId), `<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-primary" type="button" data-action="submit-comment">Comment</button>`, {wide:true});
+        const nextEditor = document.querySelector('#comment-form textarea[name="text"]');
+        if (nextEditor) nextEditor.value = draft;
+      } catch (error) { toast(friendlyError(error), "error"); }
+      return;
+    }
+    if (a === "submit-comment") {
+      const form = document.getElementById("comment-form");
+      const d = Object.fromEntries(new FormData(form));
+      const text = String(d.text || "").trim();
+      if (!text) { toast("Write a comment first.", "error"); return; }
+      await api.commentOnPost({postId:d.postId,text});
+      const post = state.posts.find((item) => item.id === d.postId);
+      if (post) post.commentCount = Number(post.commentCount || 0) + 1;
+      await loadPostComments(d.postId, false);
+      paint();
+      modal("Comments", renderCommentPanel(d.postId), `<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-primary" type="button" data-action="submit-comment">Comment</button>`, {wide:true});
+      toast("Comment added.", "success");
+      return;
+    }
     if (a === "share-post") { const url=location.href; try { if(navigator.share) await navigator.share({title:"Marvel Chat",text:"Check this post on Marvel Chat",url}); else {await navigator.clipboard.writeText(url);toast("Link copied.","success");} } catch {} return; }
     if (a === "remove-pending-media") {
       const index = Math.max(0, Number(actionEl.dataset.index || 0));
@@ -930,15 +1266,67 @@ document.addEventListener("click", async (e) => {
       if (box) box.innerHTML = "";
       return;
     }
-    if (a === "load-post-media") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(p) await hydratePostMedia(p); return; }
-    if (a === "view-moment") { const m=state.moments.find((x)=>x.id===actionEl.dataset.id); if(!m)return; let urls=[]; if(m.mediaId) { try { urls=await readMomentMedia(m.id,[m.mediaId]); } catch {} } modal(m.uid === state.user.uid ? "Your Moment" : "Moment",`<div class="moment-view"><div class="moment-large-avatar">${avatar(m.author || m,"xl",true)}</div><span class="eyebrow">${esc(m.contentType || "text")}</span><h3>${esc(m.authorSnapshot?.displayName || m.author?.displayName || m.displayName || m.username || "")}</h3>${urls[0]?.url ? `<img class="moment-view-image" src="${esc(urls[0].url)}" alt="Moment photo" loading="lazy">` : ""}<p>${esc(m.text || "")}</p><small>${formatDate(m.createdAt)}</small></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Done</button>${m.uid === state.user.uid || m.authorUid === state.user.uid ? `<button class="btn btn-primary" type="button" data-action="delete-moment" data-id="${esc(m.id)}">Delete</button>` : ""}`); return; }
-    if (a === "delete-moment") { await api.deleteMoment({momentId:actionEl.dataset.id}); closeModal(); toast("Moment deleted.","success"); await loadHome({force:true}); paint(); return; }
+    if (a === "load-post-media") { const p=state.posts.find((x)=>x.id===actionEl.dataset.id); if(p){p.mediaUrls=null;p.mediaLoadFailed=false;await hydratePostMedia(p);} return; }
+    if (a === "view-moment") { const m=state.moments.find((x)=>x.id===actionEl.dataset.id); if(!m)return; let urls=[]; if(m.mediaId) { try { urls=await readMomentMedia(m.id,[m.mediaId]); } catch {} } const ownMoment = m.uid === state.user.uid || m.authorUid === state.user.uid; modal(ownMoment ? "Your Moment" : "Moment",`<div class="moment-view"><div class="moment-large-avatar">${avatar(authorFor(m),"xl",true)}</div><span class="eyebrow">${esc(m.contentType || "text")}</span><h3>${esc(authorFor(m).displayName || authorFor(m).username || "")}</h3>${urls[0]?.url ? `<img class="moment-view-image" src="${esc(urls[0].url)}" alt="Moment photo" loading="lazy">` : ""}<p>${esc(m.text || "")}</p><small>${formatDate(m.createdAt)}</small></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Done</button>${ownMoment ? `<button class="btn btn-secondary" type="button" data-action="edit-moment" data-id="${esc(m.id)}">Edit</button><button class="btn btn-primary" type="button" data-action="delete-moment" data-id="${esc(m.id)}">Delete</button>` : ""}`); return; }
+    if (a === "edit-moment") { const m=state.moments.find((x)=>x.id===actionEl.dataset.id); if(!m || (m.uid!==state.user.uid && m.authorUid!==state.user.uid)) return; modal("Edit Moment",`<form id="edit-moment-form" class="form-stack compact-form"><input type="hidden" name="momentId" value="${esc(m.id)}"><label class="floating-field"><textarea name="text" maxlength="2000" placeholder=" ">${esc(m.text || "")}</textarea><span>Moment text</span></label><small class="muted">Existing media is preserved. Replacing media uses your shared daily allowance.</small></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-moment">Save</button>`); return; }
+    if (a === "submit-edit-moment") { const d=Object.fromEntries(new FormData(document.getElementById("edit-moment-form"))); await api.updateMoment({momentId:d.momentId,text:String(d.text || "").trim()}); const item=state.moments.find((x)=>x.id===d.momentId); if(item) item.text=String(d.text || "").trim(); closeModal(); toast("Moment updated.","success"); paint(); return; }
+    if (a === "delete-moment") { const momentId=actionEl.dataset.id; await api.deleteMoment({momentId}); let cleanup=null; try { cleanup=await api.cleanupDeletedMedia({feature:"moment",parentId:momentId,parentCollection:"moments"}); } catch (error) { console.warn("[Marvel Chat] Deleted Moment media cleanup pending", error?.code || "unknown"); } closeModal(); toast(cleanup?.pendingIds?.length ? "Moment deleted; some media cleanup needs retry." : "Moment deleted.", cleanup?.pendingIds?.length ? "error" : "success"); await loadHome({force:true}); paint(); return; }
     if (a === "clear-home-search") { state.searchQuery="";state.homeSearchResults=[];paint();return; }
     if (a === "clear-chat-search") { state.chatSearchQuery="";state.chatSearchResults=[];paint();return; }
     if (a === "focus-chat-search") { state.route="chat"; paint(); setTimeout(()=>document.querySelector('#chat-person-search-form input[name="query"]')?.focus(),0); return; }
     if (a === "open-thread") { state.activeThreadId=actionEl.dataset.id;state.messages=[];const thread=state.threads.find((x)=>x.id===state.activeThreadId);if(thread) await hydrateThreadPeer(thread);paint();await loadMessages(state.activeThreadId);return; }
     if (a === "close-thread") { clearSubscriptions();state.activeThreadId=null;state.messages=[];go("chat");return; }
-    if (a === "delete-message") { await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode:"for_everyone"});toast("Message deleted.","success");return; }
+    if (a === "message-options") {
+      const message = state.messages.find((item) => item.id === actionEl.dataset.id);
+      if (!message || message.status === "deleted_for_everyone") return;
+      const own = message.senderUid === state.user.uid;
+      const actions = [];
+      if (own) actions.push(`<button class="btn btn-secondary btn-block" type="button" data-action="edit-message" data-id="${esc(message.id)}">Edit message</button>`);
+      actions.push(`<button class="btn btn-secondary btn-block" type="button" data-action="delete-message-me" data-id="${esc(message.id)}">Delete for me</button>`);
+      if (own) actions.push(`<button class="btn btn-secondary btn-block" type="button" data-action="delete-message-everyone" data-id="${esc(message.id)}">Delete for everyone</button>`);
+      modal("Message options", `<div class="form-stack">${actions.join("")}</div>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`);
+      return;
+    }
+    if (a === "edit-message") {
+      const message = state.messages.find((item) => item.id === actionEl.dataset.id);
+      if (!message || message.senderUid !== state.user.uid) return;
+      modal("Edit message", `<form id="edit-message-form" class="form-stack"><input type="hidden" name="messageId" value="${esc(message.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(message.text || "")}</textarea><span>Message</span></label></form>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-message">Save edit</button>`);
+      return;
+    }
+    if (a === "submit-edit-message") {
+      const d = Object.fromEntries(new FormData(document.getElementById("edit-message-form")));
+      const text = String(d.text || "").trim();
+      if (!text) { toast("A message cannot be empty.", "error"); return; }
+      await api.editMessage({threadId:state.activeThreadId,messageId:d.messageId,text});
+      closeModal(); toast("Message edited.", "success"); return;
+    }
+    if (a === "delete-message-me" || a === "delete-message-everyone") {
+      const mode = a === "delete-message-me" ? "for_me" : "for_everyone";
+      await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode});
+      closeModal(); toast(mode === "for_me" ? "Message removed from your view." : "Message deleted for everyone.", "success"); return;
+    }
+    if (a === "thread-menu" || a === "active-thread-menu") {
+      const threadId = actionEl.dataset.id || state.activeThreadId;
+      const thread = state.threads.find((item) => item.id === threadId);
+      if (!thread) return;
+      const pinned = Array.isArray(thread.pinnedUids) && thread.pinnedUids.includes(state.user.uid);
+      modal("Conversation options", `<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="toggle-thread-pin" data-id="${esc(threadId)}" data-enabled="${pinned ? "false" : "true"}">${pinned ? "Unpin conversation" : "Pin conversation"}</button><button class="btn btn-secondary btn-block" type="button" data-action="hide-thread" data-id="${esc(threadId)}">Delete conversation for me</button></div>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`);
+      return;
+    }
+    if (a === "toggle-thread-pin" || a === "hide-thread") {
+      const threadId = actionEl.dataset.id;
+      if (a === "hide-thread" && threadId === state.activeThreadId) state.activeThreadId = null;
+      const thread = state.threads.find((item) => item.id === threadId);
+      const pinned = Array.isArray(thread?.pinnedUids) && thread.pinnedUids.includes(state.user.uid);
+      if (a === "toggle-thread-pin") {
+        await api.updateChatThreadPreference({threadId,preference:"pin",enabled:actionEl.dataset.enabled === "true"});
+      } else {
+        await api.updateChatThreadPreference({threadId,preference:"delete_for_me",enabled:true});
+      }
+      closeModal(); await loadThreads(); paint();
+      toast(a === "hide-thread" ? "Conversation removed from your list." : (pinned ? "Conversation unpinned." : "Conversation pinned."), "success");
+      return;
+    }
     if (a === "message-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); const profile=item?.result || item || {}; const derivedUsername = profile.username || String(item?.subtitle || "").replace(/^@/, ""); state.threadPeers[target]={uid:target,displayName:item?.title || profile.displayName || derivedUsername || "Conversation",username:derivedUsername,photoURL:profile.photoURL || null};saveThreadPeers(); const id=await findOrCreateDirectThread(target,state.threadPeers[target]); state.route="chat";state.activeThreadId=id;await loadThreads();paint();await loadMessages(id);return; }
     if (a === "view-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); await openPublicUserProfile(target,item || {}); return; }
     if (a === "follow-user" || a === "unfollow-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const current=await api.getFollowState({targetUid:target}); if(current?.following){await api.unfollowUser({targetUid:target});state.followingIds=state.followingIds.filter((id)=>String(id)!==String(target));toast("No longer following.","success");}else{await api.followUser({targetUid:target});state.followingIds=[...new Set([...state.followingIds,String(target)])];toast("Following.","success");} paint(); return; }
@@ -949,32 +1337,85 @@ document.addEventListener("click", async (e) => {
     if (a === "edit-skill-listing") { const s=state.skillListingsMine.find((x)=>x.id===actionEl.dataset.id); if(s)openSkillListingEditor(s);return; }
     if (a === "pause-skill-listing" || a === "activate-skill-listing") { await api.updateSkillListing({listingId:actionEl.dataset.id,status:a === "activate-skill-listing" ? "active" : "paused"});toast(a === "activate-skill-listing" ? "Service offered again." : "Service paused.","success");await loadSkillWorkspace();paint();return; }
     if (a === "delete-skill-listing") { await api.deleteSkillListing({listingId:actionEl.dataset.id});toast("Service archived.","success");await loadSkillWorkspace();paint();return; }
-    if (a === "market-view") { const m=state.products.find((x)=>(x.id || x.result?.id)===actionEl.dataset.id); if(m)openMarketProduct(m);return; }
+    if (a === "market-view") { const m=state.products.find((x)=>String(x.productId || x.id || x.result?.productId || x.result?.id)===actionEl.dataset.id); if(m)openMarketProduct(m);return; }
     if (a === "submit-purchase") { const d=Object.fromEntries(new FormData(document.getElementById("purchase-form"))); const quantity=Math.max(1,Math.min(1000,Number(d.quantity||1))); await api.createMarketCommerceRequest({items:[{productId:d.productId,quantity}],customerNote:String(d.customerNote || "").trim()});closeModal();toast("Commerce request sent.","success");return; }
     if (a === "route-seller-onboarding") { state.sellerOnboardingStep=0;go("seller-onboarding");return; }
     if (a === "submit-store") { const d=Object.fromEntries(new FormData(document.getElementById("seller-details-form"))); if(state.myStore){await api.updateStoreProfile({storeId:state.myStore.id,name:String(d.name).trim(),description:String(d.description || "").trim(),locationText:String(d.location || "").trim()});toast("Store updated.","success");}else{const r=await api.createStore({name:String(d.name).trim(),description:String(d.description || "").trim(),category:String(d.category || "").trim(),location:String(d.location || "").trim()});state.sellerDraft={...state.sellerDraft,...d,storeId:r?.storeId || "",agreed:true};saveSellerDraft();toast("Store created.","success");}closeModal();await loadBusinessWorkspace();go("business");return; }
     if (a === "store-status-toggle") { await api.setStoreStatus({storeId:state.myStore.id,status:actionEl.dataset.status});toast(actionEl.dataset.status === "active" ? "Store is open." : "Store is paused.","success");await loadBusinessWorkspace();paint();return; }
     if (a === "create-product") { if(!state.myStore){go("seller-onboarding");return;}openProductEditor();return; }
     if (a === "edit-product") { const p=state.myProducts.find((x)=>x.id===actionEl.dataset.id);if(p)openProductEditor(p);return; }
-    if (a === "submit-product") { const f=document.getElementById("product-form");const d=Object.fromEntries(new FormData(f));const id=actionEl.dataset.id;const payload={title:String(d.title || "").trim(),description:String(d.description || "").trim(),categoryId:String(d.categoryId || "") || null,priceMinor:safeMinor(d.priceMinor),currency:String(d.currency || "NGN").trim().toUpperCase(),tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean)};if(id)await api.updateProduct({productId:id,...payload});else await api.createProduct({storeId:state.myStore.id,...payload,mediaIds:[]});closeModal();toast(id ? "Product updated." : "Product created.","success");await loadBusinessWorkspace();paint();return; }
+    if (a === "submit-product") { const f=document.getElementById("product-form");const d=Object.fromEntries(new FormData(f));const id=actionEl.dataset.id;const existing=state.myProducts.find((item)=>item.id===id);const previousMediaIds=Array.isArray(existing?.mediaIds)?existing.mediaIds:[];let mediaIds=previousMediaIds;if(state.pendingProductPhoto){const mediaId=await uploadFeaturePhoto(state.pendingProductPhoto,"market_product");mediaIds=[mediaId];}if(!id && !mediaIds.length){toast("A product photo is required before creating the listing.","error");return;}const payload={title:String(d.title || "").trim(),description:String(d.description || "").trim(),categoryId:String(d.categoryId || "") || null,priceMinor:safeMinor(d.priceMinor),currency:String(d.currency || "NGN").trim().toUpperCase(),tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean)};if(id)await api.updateProduct({productId:id,...payload,...(state.pendingProductPhoto ? {mediaIds} : {})});else await api.createProduct({storeId:state.myStore.id,...payload,mediaIds});if(id && state.pendingProductPhoto){const oldIds=previousMediaIds.filter((mid)=>!mediaIds.includes(mid));if(oldIds.length){try{await api.cleanupDeletedMedia({feature:"market_product",parentId:id,parentCollection:"products",mediaIds:oldIds});}catch(error){console.warn("[Marvel Chat] Previous product photo cleanup pending",error?.code || "unknown");}}}state.pendingProductPhoto=null;closeModal();toast(id ? "Product updated." : "Product saved as a draft with its photo.","success");await loadBusinessWorkspace();paint();return; }
     if (a === "inventory-product") { const p=state.myProducts.find((x)=>x.id===actionEl.dataset.id);if(!p)return;modal("Update inventory",`<form id="inventory-form" class="form-stack"><input type="hidden" name="productId" value="${esc(p.id)}"><label class="floating-field"><input name="inventoryQuantity" type="number" min="1" max="1000000" value="${Number(p.inventoryQuantity || 0)}" required placeholder=" "><span>Inventory quantity</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-inventory">Save stock</button>`);return; }
     if (a === "submit-inventory") { const d=Object.fromEntries(new FormData(document.getElementById("inventory-form"))); await api.setProductInventory({productId:d.productId,inventoryQuantity:Math.max(1,Math.floor(Number(d.inventoryQuantity||1)))});closeModal();toast("Inventory updated.","success");await loadBusinessWorkspace();paint();return; }
     if (a === "activate-product" || a === "pause-product") { await api.setProductAvailability({productId:actionEl.dataset.id,status:a === "activate-product" ? "active" : "paused"});toast(a === "activate-product" ? "Product activated." : "Product paused.","success");await loadBusinessWorkspace();paint();return; }
     if (a === "archive-product") { await api.archiveProduct({productId:actionEl.dataset.id});toast("Product archived.","success");await loadBusinessWorkspace();paint();return; }
     if (a === "commerce-status") { await api.updateMarketCommerceRequestStatus({requestId:actionEl.dataset.id,status:actionEl.dataset.status});toast("Commerce request updated.","success");await loadBusinessWorkspace();paint();return; }
     if (a === "edit-profile") { openProfileEdit();return; }
-    if (a === "submit-profile") { const d=Object.fromEntries(new FormData(document.getElementById("profile-form"))); await api.updateProfile({displayName:String(d.displayName).trim(),username:String(d.username).trim().replace(/^@/,"").toLowerCase(),bio:String(d.bio || "").trim(),location:String(d.location || "").trim()}); await updateAuthProfile(state.user,{displayName:String(d.displayName).trim()}); state.profile={...state.profile,...d,displayName:String(d.displayName).trim()};closeModal();toast("Profile updated.","success");paint();return; }
+    if (a === "submit-profile") { const d=Object.fromEntries(new FormData(document.getElementById("profile-form")));const previousPhotoId=state.profile?.photoMediaId;const payload={displayName:String(d.displayName).trim(),username:String(d.username).trim().replace(/^@/,"").toLowerCase(),bio:String(d.bio || "").trim(),location:String(d.location || "").trim()};if(state.pendingProfilePhoto){payload.photoMediaId=await uploadFeaturePhoto(state.pendingProfilePhoto,"profile_photo");}await api.updateProfile(payload);await updateAuthProfile(state.user,{displayName:payload.displayName});state.profile={...state.profile,...payload,displayName:payload.displayName};if(payload.photoMediaId){try{const urls=await readFeatureMedia(state.user.uid,[payload.photoMediaId],"profile_photo","users");state.profile.photoURL=urls[0]?.url || state.profile.photoURL;}catch{}}if(previousPhotoId && payload.photoMediaId && previousPhotoId !== payload.photoMediaId){try{await api.cleanupDeletedMedia({feature:"profile_photo",parentId:state.user.uid,parentCollection:"users",mediaIds:[previousPhotoId]});}catch(error){console.warn("[Marvel Chat] Previous profile photo cleanup pending",error?.code || "unknown");}}state.pendingProfilePhoto=null;closeModal();toast("Profile updated.","success");paint();return; }
     if (a === "read-notification") { const notificationId=actionEl.dataset.id;await api.markNotificationRead({notificationId});state.notifications=state.notifications.filter((n)=>n.id!==notificationId);state.unreadNotifications=Math.max(0,state.unreadNotifications-1);paint();await loadNotifications();paint();return; }
     if (a === "enable-notifications") { await enableBrowserNotifications(); return; }
     if (a === "disable-notifications") { await disableBrowserNotifications(); return; }
     if (a.startsWith("theme-")) { const t=a.slice(6);setTheme(t);paint();try{await api.updateUserSettings({themeId:t});}catch{}return; }
     if (a === "market-category") { state.marketCategory=actionEl.dataset.category || "all";paint();return; }
     if (a === "skills-category") { state.skillCategory=actionEl.dataset.category || "all";paint();return; }
-    if (a === "onboarding-next") { const step=state.sellerOnboardingStep; if(step===2 && !document.getElementById("seller-agreement")?.checked){toast("Please accept the seller standards.","error");return;} if(step===3){const f=document.getElementById("seller-details-form");const d=f ? Object.fromEntries(new FormData(f)) : {};state.sellerDraft={...state.sellerDraft,...d,agreed:true};saveSellerDraft(); if(state.myStore) await api.updateStoreProfile({storeId:state.myStore.id,name:String(d.name).trim(),description:String(d.description || "").trim(),locationText:String(d.location || "").trim()}); else {const r=await api.createStore({name:String(d.name).trim(),description:String(d.description || "").trim(),category:String(d.category || "").trim(),location:String(d.location || "").trim()});state.sellerDraft.storeId=r?.storeId || "";} await loadBusinessWorkspace();go("business");return;} state.sellerOnboardingStep++;paint();return; }
+    if (a === "onboarding-next") { const step=state.sellerOnboardingStep; if(step===2 && !document.getElementById("seller-agreement")?.checked){toast("Please accept the seller standards.","error");return;} if(step===3){const f=document.getElementById("seller-details-form");if(f){state.sellerDraft={...state.sellerDraft,...Object.fromEntries(new FormData(f))};saveSellerDraft();}} if(step===7){const f=document.getElementById("seller-details-form");const d=f ? Object.fromEntries(new FormData(f)) : state.sellerDraft;state.sellerDraft={...state.sellerDraft,...d,agreed:true};saveSellerDraft(); if(state.myStore) await api.updateStoreProfile({storeId:state.myStore.id,name:String(d.name).trim(),description:String(d.description || "").trim(),locationText:String(d.location || "").trim()}); else {const r=await api.createStore({name:String(d.name).trim(),description:String(d.description || "").trim(),category:String(d.category || "").trim(),location:String(d.location || "").trim()});state.sellerDraft.storeId=r?.storeId || "";} await loadBusinessWorkspace();go("business");return;} state.sellerOnboardingStep++;paint();return; }
     if (a === "onboarding-back") { if(state.sellerOnboardingStep>0){state.sellerOnboardingStep--;paint();}return; }
-    if (a === "skill-onboarding-next") { const step=state.skillOnboardingStep;const f=document.getElementById("skill-details-form");if(f){const d=Object.fromEntries(new FormData(f));state.skillDraft={...state.skillDraft,...d};saveSkillDraft();} if(step===3){const d=state.skillDraft;const categories=String(d.category || "").trim();await api.upsertSkillProfile({headline:String(d.headline || "").trim(),bio:String(d.bio || "").trim(),locationText:String(d.locationText || "").trim(),remote:String(d.remote) !== "false",yearsExperience:Math.max(0,Math.min(80,Math.floor(Number(d.yearsExperience || 0)))),categories:categories ? [categories] : []}); if(d.listingTitle && d.listingDescription && d.category){await api.createSkillListing({title:String(d.listingTitle).trim(),description:String(d.listingDescription).trim(),categoryId:String(d.category),currency:String(d.currency || "NGN"),priceFromMinor:d.priceFromMinor === "" ? null : safeMinor(d.priceFromMinor),deliveryTimeDays:d.deliveryTimeDays === "" ? null : Math.max(1,Math.min(365,Math.floor(Number(d.deliveryTimeDays)))),tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean)});} state.skillDraft={...state.skillDraft,skillProfileUid:state.user.uid};saveSkillDraft();toast("Provider profile saved.","success");await loadSkillWorkspace();go("skill-profile");return;} state.skillOnboardingStep++;paint();return; }
+    if (a === "skill-onboarding-next") {
+      const step = state.skillOnboardingStep;
+      if (step === 0 && !document.getElementById("skill-provider-agreement")?.checked && !state.skillDraft.agreed) {
+        toast("Please accept the provider responsibilities to continue.", "error");
+        return;
+      }
+      if (step === 0) state.skillDraft = {...state.skillDraft, agreed:true};
+      const f = document.getElementById("skill-details-form");
+      if (f) {
+        const d = Object.fromEntries(new FormData(f));
+        state.skillDraft = {...state.skillDraft, ...d};
+        saveSkillDraft();
+      }
+      if (step === 4) {
+        const d = state.skillDraft;
+        const category = String(d.category || "").trim();
+        if (!d.headline || !d.bio || !d.listingTitle || !d.listingDescription || !category) {
+          toast("Complete your provider profile and first service before publishing.", "error");
+          return;
+        }
+        await api.upsertSkillProfile({
+          headline:String(d.headline).trim(),
+          bio:String(d.bio).trim(),
+          locationText:String(d.locationText || "").trim(),
+          remote:String(d.remote) !== "false",
+          yearsExperience:Math.max(0,Math.min(80,Math.floor(Number(d.yearsExperience || 0)))),
+          categories:[category],
+        });
+        let mediaIds = [];
+        if (state.pendingSkillPhoto) {
+          mediaIds = [await uploadFeaturePhoto(state.pendingSkillPhoto, "skill_listing")];
+        }
+        await api.createSkillListing({
+          title:String(d.listingTitle).trim(),
+          description:String(d.listingDescription).trim(),
+          categoryId:category,
+          currency:String(d.currency || "NGN"),
+          priceFromMinor:d.priceFromMinor === "" ? null : safeMinor(d.priceFromMinor),
+          deliveryTimeDays:d.deliveryTimeDays === "" ? null : Math.max(1,Math.min(365,Math.floor(Number(d.deliveryTimeDays)))),
+          tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean),
+          mediaIds,
+        });
+        state.pendingSkillPhoto = null;
+        state.skillDraft = {...state.skillDraft, skillProfileUid:state.user.uid};
+        saveSkillDraft();
+        toast("Provider profile and first service published.", "success");
+        await loadSkillWorkspace();
+        go("skill-profile");
+        return;
+      }
+      state.skillOnboardingStep++;
+      paint();
+      return;
+    }
     if (a === "skill-onboarding-back") { if(state.skillOnboardingStep>0){state.skillOnboardingStep--;paint();}return; }
-    if (a === "submit-skill-listing") { const d=Object.fromEntries(new FormData(document.getElementById("skill-listing-form")));const id=actionEl.dataset.id;const payload={title:String(d.title || "").trim(),description:String(d.description || "").trim(),categoryId:String(d.categoryId || ""),currency:"NGN",priceFromMinor:d.priceFromMinor === "" ? null : safeMinor(d.priceFromMinor),deliveryTimeDays:d.deliveryTimeDays === "" ? null : Math.max(1,Math.min(365,Math.floor(Number(d.deliveryTimeDays)))),tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean)};if(id)await api.updateSkillListing({listingId:id,...payload});else await api.createSkillListing(payload);closeModal();toast(id ? "Listing updated." : "Listing published.","success");await loadSkillWorkspace();paint();return; }
+    if (a === "submit-skill-listing") { const d=Object.fromEntries(new FormData(document.getElementById("skill-listing-form")));const id=actionEl.dataset.id;const existing=state.skillListingsMine.find((item)=>item.id===id);const previousMediaIds=Array.isArray(existing?.mediaIds)?existing.mediaIds:[];let mediaIds=previousMediaIds;if(state.pendingSkillPhoto){const mediaId=await uploadFeaturePhoto(state.pendingSkillPhoto,"skill_listing");mediaIds=[mediaId];}const payload={title:String(d.title || "").trim(),description:String(d.description || "").trim(),categoryId:String(d.categoryId || ""),currency:"NGN",priceFromMinor:d.priceFromMinor === "" ? null : safeMinor(d.priceFromMinor),deliveryTimeDays:d.deliveryTimeDays === "" ? null : Math.max(1,Math.min(365,Math.floor(Number(d.deliveryTimeDays)))),tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean),...(state.pendingSkillPhoto ? {mediaIds} : {})};let saved;if(id)saved=await api.updateSkillListing({listingId:id,...payload});else saved=await api.createSkillListing({...payload,mediaIds});if(id && state.pendingSkillPhoto){const oldIds=previousMediaIds.filter((mid)=>!mediaIds.includes(mid));if(oldIds.length){try{await api.cleanupDeletedMedia({feature:"skill_listing",parentId:id,parentCollection:"skillListings",mediaIds:oldIds});}catch(error){console.warn("[Marvel Chat] Previous service photo cleanup pending",error?.code || "unknown");}}}state.pendingSkillPhoto=null;closeModal();toast(id ? "Listing updated." : "Listing published.","success");await loadSkillWorkspace();paint();return; }
   } catch (err) { console.error("[Marvel Chat] action failed", a, err?.code, err?.message, err); toast(friendlyError(err),"error"); }
 });
 
@@ -1008,6 +1449,33 @@ document.addEventListener("change", async (e) => {
       const box = document.getElementById("post-media-preview");
       if (box) box.innerHTML = "";
       toast(error.message,"error");
+    }
+  }
+
+  const photoInputMap = {
+    "profile-photo": ["pendingProfilePhoto", "profile-photo-preview", "Profile photo"],
+    "skill-listing-photo": ["pendingSkillPhoto", "skill-listing-photo-preview", "Service photo"],
+    "skill-onboarding-photo": ["pendingSkillPhoto", "skill-onboarding-photo-preview", "Service photo"],
+    "product-photo": ["pendingProductPhoto", "product-photo-preview", "Product photo"],
+  };
+  if (photoInputMap[input?.id] && input.files?.[0]) {
+    const token = ++mediaSelectionToken;
+    const [stateKey, previewId, label] = photoInputMap[input.id];
+    const box = document.getElementById(previewId);
+    try {
+      if (box) box.innerHTML = `<div class="media-optimizing">Checking daily quota and optimizing photo…</div>`;
+      const optimized = await prepareMediaFile(input.files[0], ALLOWED_IMAGE_TYPES, "image");
+      if (token !== mediaSelectionToken) return;
+      state[stateKey] = optimized;
+      if (box) {
+        const url = URL.createObjectURL(optimized);
+        box.innerHTML = `<img src="${url}" alt="${label} preview"><small class="muted">${(optimized.size / 1024 / 1024).toFixed(2)} MiB · optimized</small>`;
+      }
+    } catch (error) {
+      state[stateKey] = null;
+      input.value = "";
+      if (box) box.innerHTML = "";
+      toast(error.message, "error");
     }
   }
 
@@ -1063,7 +1531,7 @@ document.addEventListener("submit", async (e) => {
       return;
     }
     if(f.id === "message-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));const text=String(d.text || "").trim();if(!text)return;await api.sendMessage({threadId:state.activeThreadId,text});f.reset();return;}
-    if(f.id === "home-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();if(state.searchQuery.length<2){state.homeSearchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:"home"});state.homeSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
+    if(f.id === "home-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();if(state.searchQuery.length<2){state.homeSearchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:"people_posts"});state.homeSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "chat-person-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.chatSearchQuery=String(d.query || "").trim();if(state.chatSearchQuery.length<2){state.chatSearchResults=[];paint();return;}const r=await api.search({query:state.chatSearchQuery,scope:"users"});state.chatSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "skills-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.skillsSearchQuery=String(d.query || "").trim();paint();return;}
     if(f.id === "search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.searchScope=String(d.scope || "all");if(state.searchQuery.length<2){state.searchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:state.searchScope});state.searchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
@@ -1111,9 +1579,15 @@ void authPersistenceReady.then(() => onAuthStateChanged(auth, async (user) => {
   state.activeThreadId=null;
   state.messages=[];
   if(!user){
+    state.viewerLikedPosts = {};
+    state.publicProfilesByUid = {};
+    state.savedPosts = []; state.savedPostsCursor = null; state.savedPostsHasMore = false; state.savedView = false;
     state.profile=null;state.skillProfile=null;state.myStore=null;state.posts=[];state.moments=[];state.threads=[];state.notifications=[];state.unreadNotifications=0;state.followingIds=[];state.followStats={followersCount:0,followingCount:0};state.homeLoadedAt=0;state.postsCursor=null;state.hasMorePosts=false;state.legalHtml="";state.route="home";authMode="welcome";paint();return;
   }
   if (previousUid && previousUid !== user.uid) {
+    state.viewerLikedPosts = {};
+    state.publicProfilesByUid = {};
+    state.savedPosts = []; state.savedPostsCursor = null; state.savedPostsHasMore = false; state.savedView = false;
     state.posts=[];state.moments=[];state.threads=[];state.notifications=[];state.unreadNotifications=0;state.homeLoadedAt=0;
   }
   state.profile = {

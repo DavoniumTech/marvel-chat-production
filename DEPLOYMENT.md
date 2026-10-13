@@ -1,28 +1,24 @@
-# Marvel Chat frontend release candidate — Windows CMD / GitHub
+# Marvel Chat Frontend Release — 13 October 2026
 
-This archive contains the website files at its root. It is a static vanilla HTML/CSS/JavaScript app; no frontend npm build is required.
+Static vanilla HTML/CSS/JavaScript. No frontend npm build is needed. Includes the existing app modules, PWA manifest/service worker, `CNAME`, optimized icons/logo, legal pages and validators.
 
-## Extract from Windows Downloads
+## Windows CMD install
 
-Open Command Prompt (Win+R, type `cmd`) and run:
+Download `MARVEL-CHAT-FRONTEND-RELEASE-20261013.zip` into Downloads, then:
 
 ```bat
 cd /d "%USERPROFILE%\Downloads"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath '%USERPROFILE%\Downloads\MARVEL-CHAT-FRONTEND-RELEASE-20261012-v2.zip' -DestinationPath '%USERPROFILE%\Downloads\Marvel-Chat-Frontend-Release-20261012-v2' -Force"
-cd /d "%USERPROFILE%\Downloads\Marvel-Chat-Frontend-Release-20261012-v2"
-dir
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$zip = Join-Path $env:USERPROFILE 'Downloads\MARVEL-CHAT-FRONTEND-RELEASE-20261013.zip'; $dest = Join-Path $env:USERPROFILE 'Downloads\Marvel-Chat-Frontend-Release-20261013'; if (Test-Path $dest) { throw 'Destination already exists. Rename it or choose another destination.' }; Expand-Archive -LiteralPath $zip -DestinationPath $dest"
+cd /d "%USERPROFILE%\Downloads\Marvel-Chat-Frontend-Release-20261013"
+PUBLISH-MARVEL-CHAT-FRONTEND.cmd
 ```
 
-## Push a review branch from CMD
+The publisher uses `https://github.com/DavoniumTech/marvel-chat-production.git` and the known staging clone in Downloads. It fetches `main` over HTTP/1.1, creates branch `marvel-chat-release-20261013`, copies release files without mirroring/deleting unrelated files, shows staged diff, asks you to type `PUSH`, and pushes only that review branch. If the staging clone has uncommitted changes or points to a different repository, it stops safely. Do not force-push.
 
-Run `PUBLISH-MARVEL-CHAT-FRONTEND.cmd` from the extracted folder. It prompts for the HTTPS URL of the **existing frontend GitHub repository**, clones into a new staging folder in Downloads, creates a new branch, copies this release over the matching files, runs Git whitespace checks, and pushes the branch. It does not force-push or merge to the live branch.
+## Cloudflare publication
 
-After pushing, review the branch on GitHub and create a pull request. Do not merge or publish until the backend preflight and the real-user smoke tests pass. The GitHub push by itself does not prove the Cloudflare/Pages deployment has been triggered.
+Review the PR and merge to `main` only after review and smoke tests. A branch push alone does not update production. Verify Cloudflare Workers Builds remains connected to this GitHub repository with `main` as production branch, and confirm a new deployment reaches Ready before assuming it is live.
 
-## Release validation
+## Validation and known gaps
 
-Run `bash scripts/validate.sh` from Git Bash. The package is validated for static structure and JavaScript syntax; that is not a substitute for live Firebase/R2 end-to-end tests.
-
-## Known backend dependency
-
-The frontend expects `markNotificationRead` to delete/dismiss a notification and expects the current `getPublicProfiles` callable for chat peer identity. The paired backend candidate changes only `markNotificationRead`; do not run a blanket Functions deployment. The deployed `getMyMediaDailyUsage` source was not included in the supplied master export and must remain untouched.
+`bash scripts/validate.sh` and Node `--check` for all `js/*.js` pass. Live Firebase/Auth/R2/FCM tests remain required. Home currently pages public posts only; follower-only feed merging is not complete. Moment viewer remains modal-based (not a full-screen story player with a 15-second timer). Comment ranking by likes is not implemented. Legal pages have placeholders for support email/legal contact and require company review. Skill/Market/Profile media and global quota/R2 cleanup require live smoke tests.

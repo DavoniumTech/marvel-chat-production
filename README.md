@@ -1,23 +1,7 @@
-# Marvel Chat — Frontend Release Candidate
+# Marvel Chat Frontend Release Candidate — 2026-10-13
 
-Davonium Technologies · 12 October 2026
+Existing vanilla HTML/CSS/JS frontend; not a rebuild. Firebase project `project-ec531e09-e3fd-4408-a35`, Functions region `europe-west1`, domain `marvelchat.davoniumtech.com`.
 
-This package retains the vanilla HTML/CSS/JavaScript frontend and current Firebase project wiring. It includes responsive UI updates, a smaller initial Home batch, media carousel/caption behavior, notification badge refresh, legal-page navigation, and the Feedback menu route.
+Included: faster auth shell, Home first page 5 + cursor pages of 3 with spinner and short cache, lazy media read URLs, larger media carousel, expandable captions, like/save state, saved-post shelf, paged comments contract, More/Feedback/Sign out entries, legal return controls, profile photo and Skills/Market photo flows through private media APIs, multi-step onboarding, text-only chat composer and supported message/thread controls, and 50-section legal drafts with contact placeholders.
 
-## Environment
-
-- Firebase project: `project-ec531e09-e3fd-4408-a35`
-- Functions region: `europe-west1`
-- App: `marvelchat.davoniumtech.com`
-- Media: private Cloudflare R2 signed upload/read flow
-
-## Important limits
-
-- A frontend static validation pass does not prove authentication, App Check, callable operations, R2 upload/deletion, or push notifications work end to end.
-- The global 2 MiB-per-user-per-day quota and full R2 orphan cleanup are **not certified by this package**; keep the bucket private and verify server-side enforcement before public launch.
-- Profile-photo editing and the unused user-profile callable aliases are not claimed to be implemented end-to-end in this frontend release.
-- Do not put Firebase Admin credentials, Cloudflare secrets, service-account keys, or private tokens in this frontend.
-
-## Windows
-
-Use `DEPLOYMENT.md` and `PUBLISH-MARVEL-CHAT-FRONTEND.cmd` for Windows CMD instructions.
+Static checks passed: `bash scripts/validate.sh`, Node syntax checks for all `js/*.js`, and frontend callable names matched backend source exports. These are not production end-to-end tests. See `docs/RELEASE-TEST-MATRIX-20261013.md` and `DEPLOYMENT.md`.
