@@ -16,7 +16,8 @@ import {icon} from "./icons.js";
 import {
   uploadHomePhoto, uploadHomeMedia, uploadHomeMediaFiles, readPostMedia, uploadMomentMedia, readMomentMedia,
   uploadProfilePhoto, readProfilePhoto, uploadMarketProductPhoto, readMarketProductMedia,
-  uploadSkillListingPhoto, readSkillListingMedia, validateHomeFiles
+  uploadSkillListingPhoto, readSkillListingMedia, validateHomeFiles,
+  prepareMediaFile, MAX_MEDIA_BYTES, DAILY_MEDIA_BYTES
 } from "./media.js";
 
 const app = document.getElementById("app");
@@ -180,6 +181,9 @@ function head(kicker, title, desc = "", action = "", label = "", back = "") {
 }
 function stamp(v) { return v?.toDate ? v.toDate().getTime() : new Date(v || 0).getTime(); }
 function uidOf(x) { return x?.uid || x?.userId || x?.authorUid || x?.creatorUid || x?.ownerUid || ""; }
+function formatKB(bytes) { return `${(Math.max(0, Number(bytes) || 0) / 1024).toFixed(1)} KB`; }
+function formatMiB(bytes) { return `${(Math.max(0, Number(bytes) || 0) / (1024 * 1024)).toFixed(2)} MiB`; }
+
 function participants(t) { return Array.isArray(t.participantIds) ? t.participantIds : (Array.isArray(t.participantUids) ? t.participantUids : []); }
 function peer(t) {
   const pid = participants(t).find((x) => x !== state.user.uid) || "";
@@ -347,7 +351,7 @@ async function loadHome({reset = !state.homeLoaded} = {}) {
   try {
     const cursor = reset ? null : state.homeCursor;
     const priorCount = reset ? 0 : state.posts.length;
-    const feedPromise = api.getHomeFeed({limit: 5, ...(cursor ? {cursor} : {})});
+    const feedPromise = api.getHomeFeed({limit: 3, ...(cursor ? {cursor} : {})});
     const momentsPromise = reset ? api.getHomeMoments({limit: 12}) : Promise.resolve(null);
     const [feedResult, momentsResult] = await Promise.allSettled([feedPromise, momentsPromise]);
     if (feedResult.status !== "fulfilled") throw feedResult.reason;
@@ -368,7 +372,7 @@ async function loadHome({reset = !state.homeLoaded} = {}) {
       state.moments = Array.isArray(momentResult?.moments) ? momentResult.moments : [];
     }
     state.homeLoaded = true;
-    // The first five posts are the current page. Resolve signed R2 URLs only
+    // The first three posts are the current page. Resolve signed R2 URLs only
     // for those items, rather than hydrating dozens of posts on every visit.
     incoming.forEach((post, index) => {
       post.feedIndex = priorCount + index;
@@ -386,12 +390,44 @@ async function loadHome({reset = !state.homeLoaded} = {}) {
   }
 }
 
-async function hydratePostMedia(post) {
-  if (!post?.id || !Array.isArray(post.mediaIds) || !post.mediaIds.length || Array.isArray(post.mediaUrls) || post.mediaLoading) return;
+async function hydratePostMedia(post, requestedIndices = [0]) {
+  if (!post?.id || !Array.isArray(post.mediaIds) || post.mediaIds.length === 0) return;
+  const count = post.mediaIds.length;
+  if (!Array.isArray(post.mediaUrls) || post.mediaUrls.length !== count) {
+    post.mediaUrls = Array(count).fill(null);
+  }
+  const validIndices = [...new Set((Array.isArray(requestedIndices) ? requestedIndices : [requestedIndices])
+    .map((index) => Number(index))
+    .filter((index) => Number.isInteger(index) && index >= 0 && index < count))];
+  const busy = new Set(Array.isArray(post.mediaLoadingIndices) ? post.mediaLoadingIndices : []);
+  const missing = validIndices.filter((index) => !post.mediaUrls[index] && !busy.has(index));
+  if (!missing.length) return;
+  post.mediaLoadingIndices = [...busy, ...missing];
   post.mediaLoading = true;
-  try { post.mediaUrls = await readPostMedia(post.id, post.mediaIds); }
-  catch (error) { post.mediaUrls = null; post.mediaLoadError = true; console.debug("[Marvel Chat] post media read failed", error?.code || error?.message); }
-  finally { post.mediaLoading = false; paint(); }
+  post.mediaLoadErrorIndices = Array.isArray(post.mediaLoadErrorIndices) ? post.mediaLoadErrorIndices : [];
+  try {
+    // Generate short-lived signed URLs only for the current slide and its neighbours.
+    // Image/video bytes for other slides are not requested until the user swipes to them.
+    const result = await readPostMedia(post.id, missing.map((index) => post.mediaIds[index]));
+    const loaded = Array.isArray(result) ? result : [];
+    for (const item of loaded) {
+      const index = post.mediaIds.indexOf(item.mediaId);
+      if (index >= 0) {
+        post.mediaUrls[index] = item;
+        post.mediaLoadErrorIndices = post.mediaLoadErrorIndices.filter((value) => value !== index);
+      }
+    }
+    for (const index of missing) {
+      if (!post.mediaUrls[index]) post.mediaLoadErrorIndices.push(index);
+    }
+  } catch (error) {
+    for (const index of missing) if (!post.mediaLoadErrorIndices.includes(index)) post.mediaLoadErrorIndices.push(index);
+    console.debug("[Marvel Chat] post media read failed", error?.code || error?.message);
+  } finally {
+    post.mediaLoadingIndices = post.mediaLoadingIndices.filter((index) => !missing.includes(index));
+    post.mediaLoading = post.mediaLoadingIndices.length > 0;
+    paint();
+  }
 }
 
 async function loadSavedPosts({reset = !state.savedPostsLoaded} = {}) {
@@ -583,12 +619,30 @@ function momentCard(m, own = false) {
 function renderPostCard(p) {
   const author = p.authorSnapshot || p.author || p;
   const urls = Array.isArray(p.mediaUrls) ? p.mediaUrls : [];
-  const mediaHtml = urls.length ? `<div class="post-media-grid ${urls.length > 1 ? "multi" : ""}">${urls.map((m) => {
-    if (String(m.contentType || "").startsWith("video/")) {
-      return `<figure><video src="${esc(m.url)}" controls playsinline preload="metadata"></video></figure>`;
-    }
-    return `<figure><img src="${esc(m.url)}" alt="Photo shared by ${esc(author.displayName || "a community member")}" loading="${Number(p.feedIndex) < 5 ? "eager" : "lazy"}" fetchpriority="${Number(p.feedIndex) === 0 ? "high" : "auto"}" decoding="async"></figure>`;
-  }).join("")}</div>` : (Array.isArray(p.mediaIds) && p.mediaIds.length
+  const mediaCount = Array.isArray(p.mediaIds) ? p.mediaIds.length : urls.length;
+  const mediaIndex = Math.max(0, Math.min(Number(p.mediaIndex || 0), Math.max(0, mediaCount - 1)));
+  const mediaHtml = mediaCount ? `<div class="post-carousel" data-post-carousel data-id="${esc(p.id)}" data-count="${mediaCount}">
+    <div class="post-carousel-viewport" role="region" aria-label="Post media. Swipe horizontally to browse ${mediaCount} items">
+      <div class="post-carousel-track" data-post-carousel-track data-id="${esc(p.id)}" data-start-index="${mediaIndex}" tabindex="0">
+        ${Array.from({length: mediaCount}, (_, index) => {
+          const m = urls[index] || null;
+          const loadFailed = Array.isArray(p.mediaLoadErrorIndices) && p.mediaLoadErrorIndices.includes(index);
+          if (!m || !m.url) {
+            return `<figure class="post-carousel-slide" role="group" aria-label="${index + 1} of ${mediaCount}">${loadFailed
+              ? `<button class="carousel-lazy-placeholder is-error" type="button" data-action="load-post-media" data-id="${esc(p.id)}" data-index="${index}">Tap to retry media ${index + 1}</button>`
+              : `<div class="carousel-lazy-placeholder" role="status">${icon(p.mediaLoading ? "spinner" : "image",20)}<span>${index === mediaIndex ? "Loading media…" : "Swipe to view this item"}</span></div>`}</figure>`;
+          }
+          const mediaType = String(m.contentType || "");
+          const label = `Media ${index + 1} of ${mediaCount} shared by ${author.displayName || "a community member"}`;
+          if (mediaType.startsWith("video/")) {
+            return `<figure class="post-carousel-slide" role="group" aria-label="${index + 1} of ${mediaCount}"><video src="${esc(m.url)}" controls playsinline preload="none" aria-label="${esc(label)}"></video></figure>`;
+          }
+          return `<figure class="post-carousel-slide" role="group" aria-label="${index + 1} of ${mediaCount}"><img src="${esc(m.url)}" alt="${esc(label)}" loading="eager" fetchpriority="${Number(p.feedIndex) === 0 && index === 0 ? "high" : "auto"}" decoding="async"></figure>`;
+        }).join("")}
+      </div>
+    </div>
+    ${mediaCount > 1 ? `<div class="post-carousel-footer"><div class="post-carousel-controls"><button type="button" data-action="post-media-prev" data-id="${esc(p.id)}" aria-label="Previous photo or video" ${mediaIndex <= 0 ? "disabled" : ""}>‹</button><span data-carousel-count aria-live="polite">${mediaIndex + 1} / ${mediaCount}</span><button type="button" data-action="post-media-next" data-id="${esc(p.id)}" aria-label="Next photo or video" ${mediaIndex >= mediaCount - 1 ? "disabled" : ""}>›</button></div><div class="post-carousel-dots" aria-label="Media position">${Array.from({length:mediaCount},(_,index)=>`<button type="button" data-action="post-media-go" data-id="${esc(p.id)}" data-index="${index}" aria-label="Show media ${index+1}" aria-current="${index===mediaIndex ? "true" : "false"}"></button>`).join("")}</div></div>` : ""}
+  </div>` : (Array.isArray(p.mediaIds) && p.mediaIds.length
     ? `<button class="media-placeholder" type="button" data-action="load-post-media" data-id="${esc(p.id)}">${icon("camera",17)}<span>${p.mediaLoading ? "Loading media…" : p.mediaLoadError ? "Retry loading media" : `Load ${p.mediaIds.length > 1 ? `${p.mediaIds.length} media items` : "media"}`}</span></button>` : "");
   const expanded = Boolean(p.textExpanded);
   const showToggle = String(p.text || "").trim().length > 90;
@@ -852,17 +906,10 @@ const viewMap = {
 };
 
 function bindHomePagination() {
+  // Home pagination is deliberately user-triggered: only three posts are loaded
+  // at a time, and a real cursor request runs only when Load more is tapped.
   homePaginationObserver?.disconnect();
   homePaginationObserver = null;
-  if (state.route !== "home" || !state.homeHasMore || state.homeLoading || !state.posts.length || !("IntersectionObserver" in window)) return;
-  const sentinel = document.getElementById("home-page-sentinel");
-  if (!sentinel) return;
-  homePaginationObserver = new IntersectionObserver((entries) => {
-    if (entries.some((entry) => entry.isIntersecting) && state.route === "home" && !state.homeLoading && state.homeHasMore) {
-      void loadHome({reset: false}).catch((error) => toast(friendlyError(error), "error"));
-    }
-  }, {root: null, rootMargin: "180px 0px", threshold: 0});
-  homePaginationObserver.observe(sentinel);
 }
 
 function bindCatalogueMedia() {
@@ -900,6 +947,11 @@ function paint() {
   app.innerHTML = shell((viewMap[state.route] || renderHome)(), state.route === "chat" && Boolean(state.activeThreadId));
   bindHomePagination();
   bindCatalogueMedia();
+  // Preserve the selected carousel slide across Like/Save and other repaint actions.
+  app.querySelectorAll("[data-post-carousel-track]").forEach((track) => {
+    const index = Math.max(0, Number(track.dataset.startIndex || 0));
+    if (index > 0) requestAnimationFrame(() => { track.scrollLeft = index * track.clientWidth; });
+  });
 }
 
 async function refreshRouteData(route) {
@@ -945,12 +997,12 @@ async function signup(form) {
 function openCreatePost() {
   state.pendingMediaFile = null;
   state.pendingMediaFiles = [];
-  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><div class="upload-action-row post-upload-row"><button class="btn btn-secondary" type="button" data-action="pick-post-media">${icon("camera",18)}Choose photos or videos from gallery</button><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Up to 10 items. Photos are compressed in your browser before upload. The secure daily media quota still applies.</small></div><div id="post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
+  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><div class="upload-action-row post-upload-row"><button class="btn btn-secondary" type="button" data-action="pick-post-media">${icon("camera",18)}Choose photos or videos from gallery</button><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Up to 10 items. Each item must be 2 MiB or smaller after compression; shared daily limit is 4 MiB. Compression results show the exact KB saved.</small></div><div id="post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
 }
 
 function openCreateMoment() {
   state.pendingMomentFile = null;
-  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo</option><option value="photo_text">Photo + text</option><option value="video">Video</option><option value="video_text">Video + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><div class="upload-action-row"><button class="btn btn-secondary" type="button" data-action="pick-moment-media">${icon("camera",18)}Choose photo or video from gallery</button><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" hidden><small>Choose one photo or video for this Moment. Media is compressed in your browser before secure upload; the daily quota applies.</small></div><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
+  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo</option><option value="photo_text">Photo + text</option><option value="video">Video</option><option value="video_text">Video + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><div class="upload-action-row"><button class="btn btn-secondary" type="button" data-action="pick-moment-media">${icon("camera",18)}Choose photo or video from gallery</button><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" hidden><small>Choose one photo or video. Images are compressed before upload; each item is limited to 2 MiB and the shared daily limit is 4 MiB.</small></div><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
 }
 
 async function openComment(postId) {
@@ -1060,6 +1112,30 @@ function openCreateMenu() {
   modal("Create",`<div class="create-choice-grid"><button class="path-card" type="button" data-action="create-post"><span class="path-icon">${icon("edit",20)}</span><strong>Create Post</strong><span>Share a community update.</span></button><button class="path-card" type="button" data-action="create-moment"><span class="path-icon">${icon("spark",20)}</span><strong>Create Moment</strong><span>Share a quick temporary update.</span></button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`);
 }
 
+app.addEventListener("scroll", (event) => {
+  const track = event.target;
+  if (!track?.matches?.("[data-post-carousel-track]")) return;
+  const carousel = track.closest("[data-post-carousel]");
+  if (!carousel || !track.clientWidth) return;
+  const count = Math.max(1, Number(carousel.dataset.count || 1));
+  const index = Math.max(0, Math.min(count - 1, Math.round(track.scrollLeft / track.clientWidth)));
+  carousel.dataset.index = String(index);
+  const counter = carousel.querySelector("[data-carousel-count]");
+  if (counter) counter.textContent = `${index + 1} / ${count}`;
+  carousel.querySelectorAll("[data-action=post-media-go]").forEach((dot) => {
+    dot.setAttribute("aria-current", Number(dot.dataset.index) === index ? "true" : "false");
+  });
+  const previous = carousel.querySelector("[data-action=post-media-prev]");
+  const next = carousel.querySelector("[data-action=post-media-next]");
+  if (previous) previous.disabled = index <= 0;
+  if (next) next.disabled = index >= count - 1;
+  const post = [...state.posts, ...state.savedPosts].find((item) => item.id === track.dataset.id);
+  if (post) {
+    post.mediaIndex = index;
+    void hydratePostMedia(post, [index - 1, index, index + 1]);
+  }
+}, true);
+
 document.addEventListener("click", async (e) => {
   if (e.target?.classList?.contains("modal-backdrop")) {
     closeModal();
@@ -1118,6 +1194,17 @@ document.addEventListener("click", async (e) => {
     if (a === "pick-product-photo") { document.getElementById("product-photo-input")?.click(); return; }
     if (a === "pick-skill-photo") { document.getElementById("skill-photo-input")?.click(); return; }
     if (a === "pick-profile-photo") { document.getElementById("profile-photo-input")?.click(); return; }
+    if (["post-media-prev", "post-media-next", "post-media-go"].includes(a)) {
+      const carousel = actionEl.closest("[data-post-carousel]");
+      const track = carousel?.querySelector("[data-post-carousel-track]");
+      if (!track || !track.clientWidth) return;
+      const total = Math.max(1, Number(carousel.dataset.count || 1));
+      const current = Math.max(0, Math.min(total - 1, Math.round(track.scrollLeft / track.clientWidth)));
+      const requested = a === "post-media-prev" ? current - 1 : a === "post-media-next" ? current + 1 : Number(actionEl.dataset.index || 0);
+      const nextIndex = Math.max(0, Math.min(total - 1, requested));
+      track.scrollTo({left: nextIndex * track.clientWidth, behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth"});
+      return;
+    }
     if (a === "load-more-home") { await loadHome({reset: false}); return; }
     if (a === "load-more-saved") { await loadSavedPosts({reset: false}); return; }
     if (a === "load-more-comments") { await loadCommentsPage(activeCommentPostId, {reset: false}); return; }
@@ -1128,7 +1215,7 @@ document.addEventListener("click", async (e) => {
     }
     if (a === "create-post") { closeModal(); openCreatePost(); return; }
     if (a === "create-moment") { closeModal(); openCreateMoment(); return; }
-    if (a === "submit-post") { const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; closeModal(); toast("Post published.","success"); await loadHome({reset: true}); paint(); return; }
+    if (a === "submit-post") { if (state.pendingMediaProcessing) { toast("Please wait until media compression finishes.", "error"); return; } const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; state.pendingMediaProcessing=false; closeModal(); toast("Post published.","success"); await loadHome({reset: true}); paint(); return; }
     if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); let contentType=String(d.contentType || "text"); const text=String(d.text || "").trim(); const needsMedia=["photo","photo_text","video","video_text"].includes(contentType); if(needsMedia && !state.pendingMomentFile){toast("Choose a photo or video for this Moment.","error");return;} if(state.pendingMomentFile){const selectedVideo=state.pendingMomentFile.type.startsWith("video/"); if(selectedVideo && !contentType.startsWith("video")) contentType=text ? "video_text" : "video"; if(!selectedVideo && !contentType.startsWith("photo")) contentType=text ? "photo_text" : "photo";} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentMedia(state.pendingMomentFile); await api.createMoment({contentType,text,mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome({reset: true}); paint(); return; }
     if (a === "post-menu") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Post options",`<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="edit-post" data-id="${esc(p.id)}">Edit post</button><button class="btn btn-secondary btn-block" type="button" data-action="delete-post" data-id="${esc(p.id)}">Delete post</button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`); return; }
     if (a === "edit-post") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Edit post",`<form id="edit-post-form" class="form-stack"><input type="hidden" name="postId" value="${esc(p.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(p.text || "")}</textarea><span>Post text</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${p.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${p.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${p.visibility === "private" ? "selected" : ""}>Private</option></select></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post">Save</button>`); return; }
@@ -1199,7 +1286,7 @@ document.addEventListener("click", async (e) => {
       closeModal(); toast("Thank you. Your feedback was sent.", "success"); return;
     }
     if (a === "share-post") { const url=location.href; try { if(navigator.share) await navigator.share({title:"Marvel Chat",text:"Check this post on Marvel Chat",url}); else {await navigator.clipboard.writeText(url);toast("Link copied.","success");} } catch {} return; }
-    if (a === "load-post-media") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(p) await hydratePostMedia(p); return; }
+    if (a === "load-post-media") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(p) await hydratePostMedia(p, actionEl.dataset.index === undefined ? [0] : [Number(actionEl.dataset.index)]); return; }
     if (a === "view-moment") {
       const m = state.moments.find((item) => item.id === actionEl.dataset.id);
       if (!m) return;
@@ -1362,7 +1449,7 @@ document.addEventListener("click", async (e) => {
   } catch (err) { console.error("[Marvel Chat] action failed", a, err?.code, err?.message, err); toast(friendlyError(err),"error"); }
 });
 
-document.addEventListener("change", (e) => {
+document.addEventListener("change", async (e) => {
   const input = e.target;
   if (input?.id === "profile-photo-input" && input.files?.[0]) {
     state.pendingProfilePhotoFile = input.files[0];
@@ -1374,31 +1461,74 @@ document.addEventListener("change", (e) => {
     }
   }
   if (input?.id === "post-media" && input.files) {
+    const box = document.getElementById("post-media-preview");
     try {
       const files = validateHomeFiles(input.files);
-      state.pendingMediaFiles = files;
-      const box = document.getElementById("post-media-preview");
+      state.pendingMediaProcessing = true;
+      state.pendingMediaFiles = [];
       if (box) {
         box.querySelectorAll("img,video").forEach((media) => {
           const url = media.getAttribute("src") || "";
           if (url.startsWith("blob:")) URL.revokeObjectURL(url);
         });
-        box.innerHTML = files.map((file) => {
-          const url = URL.createObjectURL(file);
-          const visual = file.type.startsWith("video/")
-            ? `<video src="${esc(url)}" muted playsinline preload="metadata" aria-label="Selected video preview"></video>`
-            : `<img src="${esc(url)}" alt="Preview of ${esc(file.name)}" decoding="async">`;
-          return `<article class="selected-media"><div class="selected-media-preview">${visual}</div><div class="selected-media-copy"><strong>${esc(file.name)}</strong><small>${(file.size / 1024 / 1024).toFixed(2)} MiB · ${file.type.startsWith("video/") ? "Video" : "Image"}</small></div></article>`;
-        }).join("");
+        box.innerHTML = `<div class="media-processing" role="status">${icon("spinner",18)} Optimizing ${files.length} media item${files.length === 1 ? "" : "s"} for upload…</div>`;
+      }
+
+      const preparedItems = [];
+      // Process sequentially to avoid exhausting memory on mid-range phones.
+      for (const original of files) {
+        const optimized = await prepareMediaFile(original);
+        if (optimized.size > MAX_MEDIA_BYTES) {
+          throw new Error(`${original.name}: this media is still over 2 MiB after compression. Please choose a smaller file.`);
+        }
+        preparedItems.push({original, optimized});
+        if (box) {
+          const done = preparedItems.length;
+          box.innerHTML = `<div class="media-processing" role="status">${icon("spinner",18)} Compressed ${done} of ${files.length} media items…</div>`;
+        }
+      }
+
+      const totalBytes = preparedItems.reduce((sum, item) => sum + item.optimized.size, 0);
+      if (totalBytes > DAILY_MEDIA_BYTES) {
+        throw new Error(`The selected files total ${formatMiB(totalBytes)} after compression. The daily upload limit is 4.00 MiB.`);
+      }
+      const usage = await api.getMyMediaDailyUsage({});
+      const remainingBytes = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
+      if (totalBytes > remainingBytes) {
+        throw new Error(`You have reached your daily media limit. ${formatMiB(remainingBytes)} remaining; this selection needs ${formatMiB(totalBytes)}. The daily limit is 4.00 MiB.`);
+      }
+
+      state.pendingMediaFiles = preparedItems.map((item) => item.optimized);
+      if (box) {
+        box.innerHTML = preparedItems.map(({original, optimized}) => {
+          const url = URL.createObjectURL(optimized);
+          const visual = optimized.type.startsWith("video/")
+            ? `<video src="${esc(url)}" muted playsinline preload="metadata" aria-label="Optimized video preview"></video>`
+            : `<img src="${esc(url)}" alt="Optimized preview of ${esc(original.name)}" decoding="async">`;
+          const savedBytes = Math.max(0, original.size - optimized.size);
+          const percent = original.size ? Math.max(0, (savedBytes / original.size) * 100) : 0;
+          const summary = optimized.size < original.size
+            ? `${formatKB(original.size)} → ${formatKB(optimized.size)} · saved ${percent.toFixed(1)}%`
+            : `${formatKB(optimized.size)} · no further compression needed`;
+          return `<article class="selected-media"><div class="selected-media-preview">${visual}</div><div class="selected-media-copy"><strong>${esc(original.name)}</strong><small>${summary}</small><small>${optimized.type.startsWith("video/") ? "Video" : "Image"} · max 2 MiB per item</small></div></article>`;
+        }).join("") + `<p class="media-quota-note">Selection: ${formatMiB(totalBytes)} · daily limit: 4.00 MiB · remaining before upload: ${formatMiB(remainingBytes - totalBytes)}</p>`;
       }
     } catch (error) {
       state.pendingMediaFiles = [];
       input.value = "";
-      const box = document.getElementById("post-media-preview");
-      if (box) box.innerHTML = "";
-      toast(error.message,"error");
+      if (box) {
+        box.querySelectorAll("img,video").forEach((media) => {
+          const url = media.getAttribute("src") || "";
+          if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+        });
+        box.innerHTML = "";
+      }
+      toast(error.message || "Media optimization failed.", "error");
+    } finally {
+      state.pendingMediaProcessing = false;
     }
   }
+
   if (input?.id === "product-photo-input" && input.files?.[0]) {
     const file = input.files[0];
     if (!file.type.startsWith("image/")) { input.value = ""; toast("Choose an image file.", "error"); return; }
@@ -1418,17 +1548,37 @@ document.addEventListener("change", (e) => {
     if (box) box.innerHTML = `<img src="${esc(state.pendingSkillPhotoPreview)}" alt="Selected service photo">`;
   }
   if(input?.id === "moment-photo" && input.files?.[0]) {
-    const file=input.files[0];
-    try { validateHomeFiles([file]); } catch (error) { input.value = ""; state.pendingMomentFile = null; toast(error.message,"error"); return; }
-    state.pendingMomentFile=file;
-    const contentSelect=document.getElementById("moment-content-type");
-    const textValue=String(document.querySelector('#moment-form textarea[name="text"]')?.value || "").trim();
-    if (contentSelect) contentSelect.value = file.type.startsWith("video/") ? (textValue ? "video_text" : "video") : (textValue ? "photo_text" : "photo");
-    const box=document.getElementById("moment-photo-preview");
-    if(box){
-      box.querySelectorAll("img,video").forEach((media) => { const url=media.getAttribute("src") || ""; if(url.startsWith("blob:")) URL.revokeObjectURL(url); });
-      const previewUrl=URL.createObjectURL(file);
-      box.innerHTML=file.type.startsWith("video/") ? `<video src="${esc(previewUrl)}" controls playsinline preload="metadata" aria-label="Selected video preview"></video>` : `<img src="${esc(previewUrl)}" alt="Selected Moment preview" decoding="async">`;
+    const original = input.files[0];
+    try {
+      validateHomeFiles([original]);
+      const optimized = await prepareMediaFile(original);
+      if (optimized.size > MAX_MEDIA_BYTES) {
+        throw new Error("This media is still larger than 2 MiB after compression. Choose a smaller photo or video.");
+      }
+      const usage = await api.getMyMediaDailyUsage({});
+      const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
+      if (optimized.size > remaining) {
+        throw new Error(`You have reached your daily media limit. ${formatMiB(remaining)} remaining; this item needs ${formatMiB(optimized.size)}. The daily limit is 4.00 MiB.`);
+      }
+      state.pendingMomentFile = optimized;
+      const contentSelect=document.getElementById("moment-content-type");
+      const textValue=String(document.querySelector('#moment-form textarea[name="text"]')?.value || "").trim();
+      if (contentSelect) contentSelect.value = optimized.type.startsWith("video/") ? (textValue ? "video_text" : "video") : (textValue ? "photo_text" : "photo");
+      const box=document.getElementById("moment-photo-preview");
+      if(box){
+        box.querySelectorAll("img,video").forEach((media) => { const url=media.getAttribute("src") || ""; if(url.startsWith("blob:")) URL.revokeObjectURL(url); });
+        const previewUrl=URL.createObjectURL(optimized);
+        const visual=optimized.type.startsWith("video/") ? `<video src="${esc(previewUrl)}" controls playsinline preload="metadata" aria-label="Optimized Moment video preview"></video>` : `<img src="${esc(previewUrl)}" alt="Optimized Moment photo preview" decoding="async">`;
+        const saving=Math.max(0, original.size-optimized.size);
+        const pct=original.size ? Math.max(0,(saving/original.size)*100) : 0;
+        box.innerHTML=`${visual}<small class="media-compression-result">${formatKB(original.size)} → ${formatKB(optimized.size)}${saving ? ` · saved ${pct.toFixed(1)}%` : " · no further compression needed"}. Per item: 2 MiB max; daily total: 4 MiB.</small>`;
+      }
+    } catch (error) {
+      input.value = "";
+      state.pendingMomentFile = null;
+      const box=document.getElementById("moment-photo-preview");
+      if (box) box.innerHTML = "";
+      toast(error.message || "Moment media could not be optimized.","error");
     }
   }
 });

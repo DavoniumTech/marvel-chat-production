@@ -87,6 +87,7 @@ export const state = {
   commerceRequests: [],
   pendingMediaFile: null,
   pendingMediaFiles: [],
+  pendingMediaProcessing: false,
   pendingMomentFile: null,
   pendingProfilePhotoFile: null,
   pendingProfilePhotoPreview: "",

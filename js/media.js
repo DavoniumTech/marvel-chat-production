@@ -1,13 +1,17 @@
 import {api} from "./api.js";
 
 export const MAX_MEDIA_BYTES = 2 * 1024 * 1024;
-export const DAILY_MEDIA_BYTES = 2 * 1024 * 1024;
+export const DAILY_MEDIA_BYTES = 4 * 1024 * 1024;
 export const MAX_HOME_MEDIA_ITEMS = 10;
 const MAX_SOURCE_IMAGE_BYTES = 25 * 1024 * 1024;
 const MAX_SOURCE_VIDEO_BYTES = 60 * 1024 * 1024;
 const IMAGE_MAX_DIMENSION = 1600;
 const IMAGE_TARGET_BYTES = Math.floor(MAX_MEDIA_BYTES * 0.92);
 const VIDEO_TARGET_BYTES = Math.floor(MAX_MEDIA_BYTES * 0.90);
+
+function formatKB(bytes) {
+  return `${(Math.max(0, Number(bytes) || 0) / 1024).toFixed(1)} KB`;
+}
 
 export const ALLOWED_HOME_MEDIA_TYPES = new Set([
   "image/jpeg",
@@ -78,7 +82,7 @@ async function loadImageBitmap(file) {
 async function compressImage(file) {
   if (!file.type.startsWith("image/")) return file;
   // Canvas conversion flattens animated GIFs. Preserve small GIFs unchanged;
-  // the platform's 2 MiB per-file and daily quota still protects cost.
+  // the 2 MiB per-file cap and 4 MiB shared daily quota protect cost.
   if (file.type === "image/gif") {
     if (file.size <= MAX_MEDIA_BYTES) return file;
     throw new Error("Animated GIFs must be 2 MiB or smaller to preserve animation.");
@@ -88,6 +92,12 @@ async function compressImage(file) {
   try {
     const sourceWidth = source.width;
     const sourceHeight = source.height;
+    // A previously optimized WebP may be selected again from the gallery preview.
+    // Preserve it when it already meets the dimensions and size target.
+    if (file.type === "image/webp" && file.size <= IMAGE_TARGET_BYTES &&
+        Math.max(sourceWidth, sourceHeight) <= IMAGE_MAX_DIMENSION) {
+      return file;
+    }
     const scale = Math.min(1, IMAGE_MAX_DIMENSION / Math.max(sourceWidth, sourceHeight));
     let width = Math.max(1, Math.round(sourceWidth * scale));
     let height = Math.max(1, Math.round(sourceHeight * scale));
@@ -120,7 +130,7 @@ async function compressImage(file) {
     source.close?.();
   }
 
-  throw new Error("This image could not be compressed below the 2 MiB daily upload allowance.");
+  throw new Error("This image could not be compressed below the 2 MiB per-file limit. Choose a smaller image.");
 }
 
 function supportedVideoMime() {
@@ -238,7 +248,7 @@ async function compressVideo(file) {
 
   if (file.size <= MAX_MEDIA_BYTES) return file;
   throw new Error(
-      "This video could not be compressed below the 2 MiB daily allowance. Choose a shorter video."
+      "This video could not be compressed below the 2 MiB per-file limit. Choose a shorter video."
   );
 }
 
@@ -254,7 +264,13 @@ async function upload(file, feature, allowedTypes) {
   const optimized = await prepareMediaFile(file, allowedTypes, label);
 
   if (optimized.size > MAX_MEDIA_BYTES) {
-    throw new Error("The optimized media is still above the 2 MiB per-item limit. Choose a smaller file.");
+    throw new Error("This media is still larger than the 2 MiB per-file limit after compression. Choose a smaller file.");
+  }
+
+  const usage = await api.getMyMediaDailyUsage({});
+  const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
+  if (optimized.size > remaining) {
+    throw new Error(`You have reached your daily media limit. ${formatKB(remaining)} remaining; this item needs ${formatKB(optimized.size)}. The shared daily limit is 4 MiB.`);
   }
 
   const ticket = await api.createMediaUpload({
@@ -301,14 +317,20 @@ export async function uploadHomeMediaFiles(files) {
   for (const file of list) {
     const optimized = await prepareMediaFile(file, ALLOWED_HOME_MEDIA_TYPES, "media");
     if (optimized.size > MAX_MEDIA_BYTES) {
-      throw new Error("An optimized media item is still above the 2 MiB per-item limit.");
+      throw new Error("An optimized media item is still larger than the 2 MiB per-file limit.");
     }
     prepared.push(optimized);
     totalBytes += optimized.size;
   }
 
   if (totalBytes > DAILY_MEDIA_BYTES) {
-    throw new Error("The optimized selection exceeds your 2 MiB daily media allowance.");
+    throw new Error("The optimized selection exceeds the 4 MiB daily media limit.");
+  }
+
+  const usage = await api.getMyMediaDailyUsage({});
+  const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
+  if (totalBytes > remaining) {
+    throw new Error(`You have reached your daily media limit. ${formatKB(remaining)} remaining; this selection needs ${formatKB(totalBytes)}. The shared daily limit is 4 MiB.`);
   }
 
   const ids = [];
