@@ -77,6 +77,12 @@ async function loadImageBitmap(file) {
 
 async function compressImage(file) {
   if (!file.type.startsWith("image/")) return file;
+  // Canvas conversion flattens animated GIFs. Preserve small GIFs unchanged;
+  // the platform's 2 MiB per-file and daily quota still protects cost.
+  if (file.type === "image/gif") {
+    if (file.size <= MAX_MEDIA_BYTES) return file;
+    throw new Error("Animated GIFs must be 2 MiB or smaller to preserve animation.");
+  }
 
   const source = await loadImageBitmap(file);
   try {

@@ -1,4 +1,4 @@
-import {httpsCallable, appCheckReady} from "./firebase.js";
+import {httpsCallable, appCheckReady, functions} from "./firebase.js";
 
 const names = [
   "getPlatformStatus", "ensureUserProfile", "getPublicProfiles", "updateProfile", "updateUserSettings",
@@ -17,7 +17,7 @@ const names = [
   "followUser", "unfollowUser", "getFollowState", "getFollowList", "reportContent"
 ];
 
-const fns = Object.fromEntries(names.map((name) => [name, httpsCallable(name)]));
+const fns = Object.fromEntries(names.map((name) => [name, httpsCallable(functions, name)]));
 
 export async function call(name, data = {}) {
   if (!fns[name]) throw new Error(`Unknown operation: ${name}`);

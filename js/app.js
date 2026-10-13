@@ -69,10 +69,10 @@ function authField(type, label, name, opts = {}) {
 }
 
 function legalLinks() {
-  return `<p class="legal-copy">By creating an account, we agree to the
+  return `<p class="legal-copy">Please review our
     <button class="inline-link" type="button" data-action="legal-terms">Terms</button>,
     <button class="inline-link" type="button" data-action="legal-privacy">Privacy Policy</button>, and
-    <button class="inline-link" type="button" data-action="legal-community">Community Guidelines</button>.</p>`;
+    <button class="inline-link" type="button" data-action="legal-community">Community Guidelines</button> before joining.</p>`;
 }
 
 function authScreen() {
@@ -95,7 +95,7 @@ function authScreen() {
         ${authField("text", "Username", "username", {autocomplete: "username", maxlength: 30})}
         ${authField("email", "Email", "email", {autocomplete: "email", maxlength: 254})}
         ${authField("password", "Password", "password", {autocomplete: "new-password", minlength: 6, maxlength: 128, password: true})}
-        <label class="agree-row"><input type="checkbox" name="agreement" required><span>I agree to the Marvel Chat terms and community standards.</span></label>
+        <label class="agree-row"><input type="checkbox" name="agreement" required><span>I agree to the Terms, Privacy Policy, and Community Guidelines.</span></label>
         ${legalLinks()}
         <button class="btn btn-primary btn-block btn-lg" type="submit">Create account</button>
       </form>
@@ -346,6 +346,7 @@ async function loadHome({reset = !state.homeLoaded} = {}) {
   paint();
   try {
     const cursor = reset ? null : state.homeCursor;
+    const priorCount = reset ? 0 : state.posts.length;
     const feedPromise = api.getHomeFeed({limit: 5, ...(cursor ? {cursor} : {})});
     const momentsPromise = reset ? api.getHomeMoments({limit: 12}) : Promise.resolve(null);
     const [feedResult, momentsResult] = await Promise.allSettled([feedPromise, momentsPromise]);
@@ -369,9 +370,10 @@ async function loadHome({reset = !state.homeLoaded} = {}) {
     state.homeLoaded = true;
     // The first five posts are the current page. Resolve signed R2 URLs only
     // for those items, rather than hydrating dozens of posts on every visit.
-    for (const post of incoming) {
+    incoming.forEach((post, index) => {
+      post.feedIndex = priorCount + index;
       post.mediaUrls = Array.isArray(post.mediaUrls) ? post.mediaUrls : null;
-    }
+    });
     void Promise.all(incoming.filter((post) => Array.isArray(post.mediaIds) && post.mediaIds.length)
       .map((post) => hydratePostMedia(post)));
   } catch (error) {
@@ -388,7 +390,7 @@ async function hydratePostMedia(post) {
   if (!post?.id || !Array.isArray(post.mediaIds) || !post.mediaIds.length || Array.isArray(post.mediaUrls) || post.mediaLoading) return;
   post.mediaLoading = true;
   try { post.mediaUrls = await readPostMedia(post.id, post.mediaIds); }
-  catch (error) { post.mediaUrls = []; console.debug("[Marvel Chat] post media read failed", error?.code); }
+  catch (error) { post.mediaUrls = null; post.mediaLoadError = true; console.debug("[Marvel Chat] post media read failed", error?.code || error?.message); }
   finally { post.mediaLoading = false; paint(); }
 }
 
@@ -585,9 +587,9 @@ function renderPostCard(p) {
     if (String(m.contentType || "").startsWith("video/")) {
       return `<figure><video src="${esc(m.url)}" controls playsinline preload="metadata"></video></figure>`;
     }
-    return `<figure><img src="${esc(m.url)}" alt="Photo shared by ${esc(author.displayName || "a community member")}" loading="lazy" decoding="async"></figure>`;
+    return `<figure><img src="${esc(m.url)}" alt="Photo shared by ${esc(author.displayName || "a community member")}" loading="${Number(p.feedIndex) < 5 ? "eager" : "lazy"}" fetchpriority="${Number(p.feedIndex) === 0 ? "high" : "auto"}" decoding="async"></figure>`;
   }).join("")}</div>` : (Array.isArray(p.mediaIds) && p.mediaIds.length
-    ? `<button class="media-placeholder" type="button" data-action="load-post-media" data-id="${esc(p.id)}">${icon("camera",17)}<span>${p.mediaLoading ? "Loading media…" : `Load ${p.mediaIds.length > 1 ? `${p.mediaIds.length} media items` : "media"}`}</span></button>` : "");
+    ? `<button class="media-placeholder" type="button" data-action="load-post-media" data-id="${esc(p.id)}">${icon("camera",17)}<span>${p.mediaLoading ? "Loading media…" : p.mediaLoadError ? "Retry loading media" : `Load ${p.mediaIds.length > 1 ? `${p.mediaIds.length} media items` : "media"}`}</span></button>` : "");
   const expanded = Boolean(p.textExpanded);
   const showToggle = String(p.text || "").trim().length > 90;
   return `<article class="post-card modern-post" data-post-id="${esc(p.id)}">
@@ -602,7 +604,8 @@ function renderHome() {
   const following = state.moments.filter((m) => m.id !== own?.id);
   const feedBody = state.posts.length ? state.posts.map(renderPostCard).join("") :
     (state.homeLoading ? `<div class="feed-loader" role="status">${icon("spinner",18)} Loading community updates…</div>` :
-      emptyState("Your feed is quiet", state.homeError || "Public community posts and updates from people you follow will appear here.", "create-post", "Create a post"));
+      state.homeError ? emptyState("Your feed could not load", state.homeError, "retry-home", "Try again") :
+      emptyState("Your feed is quiet", "Public community posts and updates from people you follow will appear here.", "create-post", "Create a post"));
   const paging = state.homeLoading && state.posts.length
     ? `<div class="feed-loader" role="status">${icon("spinner",18)} Loading more posts…</div>`
     : state.homeHasMore ? `<div id="home-page-sentinel" class="pagination-sentinel"><button class="btn btn-secondary" type="button" data-action="load-more-home">Load more posts</button></div>`
@@ -763,9 +766,81 @@ async function disableBrowserNotifications() {
   }
 }
 
+async function legalBody(type) {
+  const pages = {
+    terms: "terms.html",
+    privacy: "privacy.html",
+    community: "community-guidelines.html"
+  };
+  const page = pages[type];
+  if (!page) throw new Error("The requested legal page is unavailable.");
+
+  const response = await fetch(new URL(page, document.baseURI), {
+    method: "GET",
+    credentials: "same-origin",
+    cache: "no-cache",
+    headers: {"Accept": "text/html"}
+  });
+  if (!response.ok) throw new Error(`Could not load the legal page (${response.status}).`);
+
+  const parsed = new DOMParser().parseFromString(await response.text(), "text/html");
+  const main = parsed.querySelector("main") || parsed.body;
+  if (!main) throw new Error("The legal page content is unavailable.");
+
+  // The files are first-party static policy documents. Strip executable or
+  // embedding elements before rendering their text inside the modal.
+  main.querySelectorAll("script,style,iframe,object,embed,form,base,meta,link").forEach((node) => node.remove());
+  main.querySelectorAll("*").forEach((node) => {
+    [...node.attributes].forEach((attribute) => {
+      if (/^on/i.test(attribute.name) || attribute.name.toLowerCase() === "srcdoc") {
+        node.removeAttribute(attribute.name);
+      }
+    });
+  });
+  main.querySelector("header")?.remove();
+  main.querySelector("h1")?.remove();
+  main.querySelector(".meta")?.remove();
+  main.querySelector(":scope > p")?.remove();
+
+  const summary = {
+    terms: "The conditions governing your use of Marvel Chat.",
+    privacy: "How Davonium Technologies handles information used to operate Marvel Chat.",
+    community: "The standards that help keep Marvel Chat useful, respectful and trustworthy."
+  }[type];
+  const hero = `<section class="legal-modal-hero"><div class="legal-modal-mark"><img src="./assets/brand/icon-192.png" width="56" height="56" alt="Marvel Chat"></div><div class="legal-modal-hero-copy"><span class="eyebrow">OFFICIAL POLICY · DAVONIUM TECHNOLOGIES</span><h3>${esc({terms:"Terms of Use",privacy:"Privacy Policy",community:"Community Guidelines"}[type])}</h3><p>${esc(summary)}</p></div></section>`;
+  return `${hero}<div class="legal-modal-document">${main.innerHTML}</div>`;
+}
+
 function openLegal(type) {
   const title = {terms:"Terms",privacy:"Privacy Policy",community:"Community Guidelines"}[type];
-  modal(title, legalBody(type), `<button class="btn btn-primary" type="button" data-action="close-modal">Done</button>`, {wide:true});
+  if (!title) return;
+  modal(title, `<div class="legal-loading" role="status"><span class="legal-loading-dot"></span>Loading the official ${esc(title)}…</div>`,
+    `<button class="btn btn-primary" type="button" data-action="close-modal">Done</button>`, {wide:true});
+
+  void legalBody(type).then((body) => {
+    const dialog = document.querySelector("#modal-root .modal");
+    if (!dialog || dialog.getAttribute("aria-label") !== title) return;
+    const content = dialog.querySelector(".modal-body");
+    if (!content) return;
+    content.innerHTML = body;
+    content.querySelectorAll('.legal-modal-document a[href^="#"]').forEach((link) => {
+      link.addEventListener("click", (event) => {
+        const targetId = link.getAttribute("href").slice(1);
+        const target = [...content.querySelectorAll("[id]")].find((element) => element.id === targetId);
+        if (!target) return;
+        event.preventDefault();
+        target.scrollIntoView({behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth", block: "start"});
+      });
+    });
+  }).catch((error) => {
+    const dialog = document.querySelector("#modal-root .modal");
+    if (!dialog || dialog.getAttribute("aria-label") !== title) return;
+    const content = dialog.querySelector(".modal-body");
+    if (content) {
+      const fallback = {terms:"terms.html",privacy:"privacy.html",community:"community-guidelines.html"}[type];
+      content.innerHTML = `<div class="legal-load-error"><p>${esc(friendlyError(error))}</p><a class="btn btn-secondary" href="./${fallback}">Open full page</a></div>`;
+    }
+  });
 }
 
 const viewMap = {
@@ -779,14 +854,14 @@ const viewMap = {
 function bindHomePagination() {
   homePaginationObserver?.disconnect();
   homePaginationObserver = null;
-  if (state.route !== "home" || !state.homeHasMore || state.homeLoading || !("IntersectionObserver" in window)) return;
+  if (state.route !== "home" || !state.homeHasMore || state.homeLoading || !state.posts.length || !("IntersectionObserver" in window)) return;
   const sentinel = document.getElementById("home-page-sentinel");
   if (!sentinel) return;
   homePaginationObserver = new IntersectionObserver((entries) => {
     if (entries.some((entry) => entry.isIntersecting) && state.route === "home" && !state.homeLoading && state.homeHasMore) {
       void loadHome({reset: false}).catch((error) => toast(friendlyError(error), "error"));
     }
-  }, {root: null, rootMargin: "360px 0px", threshold: 0});
+  }, {root: null, rootMargin: "180px 0px", threshold: 0});
   homePaginationObserver.observe(sentinel);
 }
 
@@ -870,12 +945,12 @@ async function signup(form) {
 function openCreatePost() {
   state.pendingMediaFile = null;
   state.pendingMediaFiles = [];
-  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><label class="photo-pick">${icon("camera",20)}<span><strong>Add photos or a video</strong><small>Up to 10 media items · photos/videos are optimized automatically · 2 MiB total daily allowance</small></span><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple></label><div id="post-media-preview" class="post-media-picker"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
+  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><div class="upload-action-row post-upload-row"><button class="btn btn-secondary" type="button" data-action="pick-post-media">${icon("camera",18)}Choose photos or videos from gallery</button><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Up to 10 items. Photos are compressed in your browser before upload. The secure daily media quota still applies.</small></div><div id="post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
 }
 
 function openCreateMoment() {
   state.pendingMomentFile = null;
-  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo</option><option value="photo_text">Photo + text</option><option value="video">Video</option><option value="video_text">Video + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><div class="upload-action-row"><button class="btn btn-secondary" type="button" data-action="pick-moment-media">${icon("camera",18)}Choose photo or video from gallery</button><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" hidden><small>Media is optimized before secure upload and limited to 2 MiB per file.</small></div><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
+  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo</option><option value="photo_text">Photo + text</option><option value="video">Video</option><option value="video_text">Video + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><div class="upload-action-row"><button class="btn btn-secondary" type="button" data-action="pick-moment-media">${icon("camera",18)}Choose photo or video from gallery</button><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" hidden><small>Choose one photo or video for this Moment. Media is compressed in your browser before secure upload; the daily quota applies.</small></div><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
 }
 
 async function openComment(postId) {
@@ -1037,7 +1112,9 @@ document.addEventListener("click", async (e) => {
     if (a === "feedback") { document.getElementById("menu-root")?.remove(); openFeedback(); return; }
     if (a === "sign-out") { document.getElementById("menu-root")?.remove(); await signOut(auth); return; }
     if (a === "create-menu") { openCreateMenu(); return; }
+    if (a === "pick-post-media") { document.getElementById("post-media")?.click(); return; }
     if (a === "pick-moment-media") { document.getElementById("moment-photo")?.click(); return; }
+    if (a === "retry-home") { await loadHome({reset: true}); return; }
     if (a === "pick-product-photo") { document.getElementById("product-photo-input")?.click(); return; }
     if (a === "pick-skill-photo") { document.getElementById("skill-photo-input")?.click(); return; }
     if (a === "pick-profile-photo") { document.getElementById("profile-photo-input")?.click(); return; }
@@ -1052,7 +1129,7 @@ document.addEventListener("click", async (e) => {
     if (a === "create-post") { closeModal(); openCreatePost(); return; }
     if (a === "create-moment") { closeModal(); openCreateMoment(); return; }
     if (a === "submit-post") { const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; closeModal(); toast("Post published.","success"); await loadHome({reset: true}); paint(); return; }
-    if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); const contentType=String(d.contentType || "text"); const needsMedia=["photo","photo_text","video","video_text"].includes(contentType); if(needsMedia && !state.pendingMomentFile){toast("Choose a photo or video for this Moment.","error");return;} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentMedia(state.pendingMomentFile); await api.createMoment({contentType,text:String(d.text || "").trim(),mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome({reset: true}); paint(); return; }
+    if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); let contentType=String(d.contentType || "text"); const text=String(d.text || "").trim(); const needsMedia=["photo","photo_text","video","video_text"].includes(contentType); if(needsMedia && !state.pendingMomentFile){toast("Choose a photo or video for this Moment.","error");return;} if(state.pendingMomentFile){const selectedVideo=state.pendingMomentFile.type.startsWith("video/"); if(selectedVideo && !contentType.startsWith("video")) contentType=text ? "video_text" : "video"; if(!selectedVideo && !contentType.startsWith("photo")) contentType=text ? "photo_text" : "photo";} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentMedia(state.pendingMomentFile); await api.createMoment({contentType,text,mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome({reset: true}); paint(); return; }
     if (a === "post-menu") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Post options",`<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="edit-post" data-id="${esc(p.id)}">Edit post</button><button class="btn btn-secondary btn-block" type="button" data-action="delete-post" data-id="${esc(p.id)}">Delete post</button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`); return; }
     if (a === "edit-post") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Edit post",`<form id="edit-post-form" class="form-stack"><input type="hidden" name="postId" value="${esc(p.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(p.text || "")}</textarea><span>Post text</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${p.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${p.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${p.visibility === "private" ? "selected" : ""}>Private</option></select></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post">Save</button>`); return; }
     if (a === "submit-edit-post") { const d=Object.fromEntries(new FormData(document.getElementById("edit-post-form"))); await api.updatePost({postId:d.postId,text:String(d.text || "").trim(),visibility:d.visibility}); closeModal(); toast("Post updated.","success"); await loadHome({reset: true}); paint(); return; }
@@ -1302,11 +1379,23 @@ document.addEventListener("change", (e) => {
       state.pendingMediaFiles = files;
       const box = document.getElementById("post-media-preview");
       if (box) {
-        box.innerHTML = files.map((file) => `<div class="selected-media"><span>${file.type.startsWith("video/") ? icon("video",17) : icon("camera",17)}</span><div><strong>${esc(file.name)}</strong><small>${(file.size / 1024 / 1024).toFixed(2)} MiB</small></div></div>`).join("");
+        box.querySelectorAll("img,video").forEach((media) => {
+          const url = media.getAttribute("src") || "";
+          if (url.startsWith("blob:")) URL.revokeObjectURL(url);
+        });
+        box.innerHTML = files.map((file) => {
+          const url = URL.createObjectURL(file);
+          const visual = file.type.startsWith("video/")
+            ? `<video src="${esc(url)}" muted playsinline preload="metadata" aria-label="Selected video preview"></video>`
+            : `<img src="${esc(url)}" alt="Preview of ${esc(file.name)}" decoding="async">`;
+          return `<article class="selected-media"><div class="selected-media-preview">${visual}</div><div class="selected-media-copy"><strong>${esc(file.name)}</strong><small>${(file.size / 1024 / 1024).toFixed(2)} MiB · ${file.type.startsWith("video/") ? "Video" : "Image"}</small></div></article>`;
+        }).join("");
       }
     } catch (error) {
       state.pendingMediaFiles = [];
       input.value = "";
+      const box = document.getElementById("post-media-preview");
+      if (box) box.innerHTML = "";
       toast(error.message,"error");
     }
   }
@@ -1329,9 +1418,18 @@ document.addEventListener("change", (e) => {
     if (box) box.innerHTML = `<img src="${esc(state.pendingSkillPhotoPreview)}" alt="Selected service photo">`;
   }
   if(input?.id === "moment-photo" && input.files?.[0]) {
-    const file=input.files[0]; state.pendingMomentFile=file;
+    const file=input.files[0];
+    try { validateHomeFiles([file]); } catch (error) { input.value = ""; state.pendingMomentFile = null; toast(error.message,"error"); return; }
+    state.pendingMomentFile=file;
+    const contentSelect=document.getElementById("moment-content-type");
+    const textValue=String(document.querySelector('#moment-form textarea[name="text"]')?.value || "").trim();
+    if (contentSelect) contentSelect.value = file.type.startsWith("video/") ? (textValue ? "video_text" : "video") : (textValue ? "photo_text" : "photo");
     const box=document.getElementById("moment-photo-preview");
-    if(box){const previewUrl=URL.createObjectURL(file);box.innerHTML=file.type.startsWith("video/") ? `<video src="${previewUrl}" controls playsinline preload="metadata" aria-label="Selected video preview"></video>` : `<img src="${previewUrl}" alt="Selected Moment preview">`;}
+    if(box){
+      box.querySelectorAll("img,video").forEach((media) => { const url=media.getAttribute("src") || ""; if(url.startsWith("blob:")) URL.revokeObjectURL(url); });
+      const previewUrl=URL.createObjectURL(file);
+      box.innerHTML=file.type.startsWith("video/") ? `<video src="${esc(previewUrl)}" controls playsinline preload="metadata" aria-label="Selected video preview"></video>` : `<img src="${esc(previewUrl)}" alt="Selected Moment preview" decoding="async">`;
+    }
   }
 });
 
@@ -1377,11 +1475,11 @@ onAuthStateChanged(auth, async (user) => {
     state.savedPosts = []; state.savedPostsCursor = null; state.savedPostsHasMore = false; state.savedPostsLoaded = false;
     state.notifications = []; state.unreadNotifications = 0; state.followingIds = []; state.followStats = {followersCount: 0, followingCount: 0};
   }
-  await Promise.all([
-    loadProfile().catch((error) => toast(friendlyError(error), "error")),
-    refreshNotificationSummary().catch((error) => { state.unreadNotifications = 0; console.debug("[Marvel Chat] notification badge unavailable", error?.code); }),
-  ]);
   try { state.pushEnabled = typeof Notification !== "undefined" && Notification.permission === "granted"; } catch {}
+  // Render immediately after authentication. Profile and notification requests
+  // must not hold the first Home feed paint hostage.
   paint();
+  void loadProfile().catch((error) => console.debug("[Marvel Chat] profile load deferred", error?.code || error?.message)).finally(() => paint());
+  void refreshNotificationSummary().catch((error) => { state.unreadNotifications = 0; console.debug("[Marvel Chat] notification badge unavailable", error?.code || error?.message); }).finally(() => paint());
   void refreshRouteData(state.route);
 });
