@@ -1,7 +1,7 @@
 import {api} from "./api.js";
 
 export const MAX_MEDIA_BYTES = 2 * 1024 * 1024;
-export const DAILY_MEDIA_BYTES = 4 * 1024 * 1024;
+export const DAILY_MEDIA_BYTES = 2 * 1024 * 1024;
 export const MAX_HOME_MEDIA_ITEMS = 10;
 const MAX_SOURCE_IMAGE_BYTES = 25 * 1024 * 1024;
 const MAX_SOURCE_VIDEO_BYTES = 60 * 1024 * 1024;
@@ -82,7 +82,7 @@ async function loadImageBitmap(file) {
 async function compressImage(file) {
   if (!file.type.startsWith("image/")) return file;
   // Canvas conversion flattens animated GIFs. Preserve small GIFs unchanged;
-  // the 2 MiB per-file cap and 4 MiB shared daily quota protect cost.
+  // the 2 MiB per-file cap and 2 MiB shared daily quota protect cost.
   if (file.type === "image/gif") {
     if (file.size <= MAX_MEDIA_BYTES) return file;
     throw new Error("Animated GIFs must be 2 MiB or smaller to preserve animation.");
@@ -270,7 +270,7 @@ async function upload(file, feature, allowedTypes) {
   const usage = await api.getMyMediaDailyUsage({});
   const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
   if (optimized.size > remaining) {
-    throw new Error(`You have reached your daily media limit. ${formatKB(remaining)} remaining; this item needs ${formatKB(optimized.size)}. The shared daily limit is 4 MiB.`);
+    throw new Error(`You have reached your daily media limit. ${formatKB(remaining)} remaining; this item needs ${formatKB(optimized.size)}. The shared daily limit is 2 MiB.`);
   }
 
   const ticket = await api.createMediaUpload({
@@ -324,13 +324,13 @@ export async function uploadHomeMediaFiles(files) {
   }
 
   if (totalBytes > DAILY_MEDIA_BYTES) {
-    throw new Error("The optimized selection exceeds the 4 MiB daily media limit.");
+    throw new Error("The optimized selection exceeds the 2 MiB daily media limit.");
   }
 
   const usage = await api.getMyMediaDailyUsage({});
   const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
   if (totalBytes > remaining) {
-    throw new Error(`You have reached your daily media limit. ${formatKB(remaining)} remaining; this selection needs ${formatKB(totalBytes)}. The shared daily limit is 4 MiB.`);
+    throw new Error(`You have reached your daily media limit. ${formatKB(remaining)} remaining; this selection needs ${formatKB(totalBytes)}. The shared daily limit is 2 MiB.`);
   }
 
   const ids = [];

@@ -46,7 +46,33 @@ let authMode = "welcome";
 let googleSignInPending = false;
 let homePaginationObserver = null;
 let catalogueMediaObserver = null;
+const carouselHydrationTimers = new Map();
 let momentAutoCloseTimer = null;
+const DISCOVERY_BANNER_INTERVAL_MS = 24 * 60 * 60 * 1000;
+let discoveryBannerVisibleForUser = null;
+
+function shouldShowDiscoveryBanner() {
+  if (discoveryBannerVisibleForUser !== null) return discoveryBannerVisibleForUser;
+  const uid = String(state.user?.uid || "").trim();
+  if (!uid) {
+    discoveryBannerVisibleForUser = false;
+    return false;
+  }
+  const key = `marvelchat.discovery-banner.last-shown.v1.${uid}`;
+  try {
+    const lastShown = Number(window.localStorage.getItem(key) || 0);
+    if (Number.isFinite(lastShown) && lastShown > 0 &&
+        Date.now() - lastShown < DISCOVERY_BANNER_INTERVAL_MS) {
+      discoveryBannerVisibleForUser = false;
+      return false;
+    }
+    window.localStorage.setItem(key, String(Date.now()));
+  } catch {
+    // Local-storage restrictions must not prevent the app from rendering.
+  }
+  discoveryBannerVisibleForUser = true;
+  return true;
+}
 let activeCommentPostId = null;
 let activeCommentCursor = null;
 let activeCommentLoading = false;
@@ -183,6 +209,42 @@ function stamp(v) { return v?.toDate ? v.toDate().getTime() : new Date(v || 0).g
 function uidOf(x) { return x?.uid || x?.userId || x?.authorUid || x?.creatorUid || x?.ownerUid || ""; }
 function formatKB(bytes) { return `${(Math.max(0, Number(bytes) || 0) / 1024).toFixed(1)} KB`; }
 function formatMiB(bytes) { return `${(Math.max(0, Number(bytes) || 0) / (1024 * 1024)).toFixed(2)} MiB`; }
+function postTextHtml(value) {
+  // Escaping happens before limited **bold** markup is introduced, so user HTML
+  // cannot become executable markup. Newlines remain visible via pre-wrap CSS.
+  return esc(value).replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>");
+}
+function postFormatToolbar(targetId) {
+  return `<div class="post-format-toolbar" role="group" aria-label="Text formatting"><button class="format-button format-bold" type="button" data-action="format-post-bold" data-target="${esc(targetId)}" aria-label="Make selected text bold"><strong>B</strong></button><button class="format-button" type="button" data-action="format-post-normal" data-target="${esc(targetId)}">Normal</button><small>Select text first, then choose Bold or Normal.</small></div>`;
+}
+function applyPostTextFormatting(targetId, mode) {
+  const field = document.getElementById(targetId);
+  if (!field) return;
+  const value = field.value || "";
+  const start = Number(field.selectionStart || 0);
+  const end = Number(field.selectionEnd || start);
+  if (mode === "bold") {
+    const selected = value.slice(start, end);
+    if (!selected) {
+      const insert = "**bold text**";
+      field.setRangeText(insert, start, end, "select");
+      field.setSelectionRange(start + 2, start + insert.length - 2);
+    } else {
+      const alreadyBold = selected.startsWith("**") && selected.endsWith("**") && selected.length >= 4;
+      const content = alreadyBold ? selected.slice(2, -2) : selected;
+      const wrapped = alreadyBold ? content : `**${content}**`;
+      field.setRangeText(wrapped, start, end, "select");
+      if (!alreadyBold) field.setSelectionRange(start + 2, start + wrapped.length - 2);
+    }
+  } else {
+    const selection = start === end ? value : value.slice(start, end);
+    const target = selection || value;
+    const normal = target.replace(/\*\*([\s\S]+?)\*\*/g, "$1");
+    if (selection) field.setRangeText(normal, start, end, "select");
+    else { field.value = normal; field.setSelectionRange(Math.min(start, normal.length), Math.min(start, normal.length)); }
+  }
+  field.focus();
+}
 
 function participants(t) { return Array.isArray(t.participantIds) ? t.participantIds : (Array.isArray(t.participantUids) ? t.participantUids : []); }
 function peer(t) {
@@ -290,6 +352,9 @@ function searchResultCard(item) {
     const following = state.followingIds.includes(String(id));
     return `<article class="result compact-result">${avatar(p,"sm",true)}<div class="grow"><strong>${esc(item?.title || p.displayName || p.username || "Member")}</strong><small>${esc(item?.subtitle || item?.subTitle || (p.username ? `@${p.username}` : p.bio || "Community member"))}</small></div>${id && id !== state.user.uid ? `<div class="result-actions"><button class="btn btn-secondary" type="button" data-action="view-user" data-id="${esc(id)}">View</button><button class="btn btn-secondary" type="button" data-action="message-user" data-id="${esc(id)}">Message</button><button class="btn btn-secondary" type="button" data-action="${following ? "unfollow-user" : "follow-user"}" data-id="${esc(id)}">${following ? "Following" : "Follow"}</button></div>` : ""}</article>`;
   }
+  if (type === "post") {
+    return `<article class="result compact-result"><div class="result-icon">${icon("grid",18)}</div><div class="grow"><strong>${esc(item?.title || "Community post")}</strong><small>${esc(item?.subtitle || "Public community update")}</small><small class="muted">Post · ${esc(when(item?.createdAt || item?.updatedAt))}</small></div><span class="muted">Post</span></article>`;
+  }
   if (type === "skill_listing") {
     return `<article class="result compact-result"><div class="result-icon">${icon("skills",18)}</div><div class="grow"><strong>${esc(item?.title || p.title || "Skill listing")}</strong><small>${esc(item?.subtitle || item?.subTitle || p.description || "")}</small></div><button class="btn btn-secondary" type="button" data-action="skill-search-view" data-id="${esc(item.id || "")}">View</button></article>`;
   }
@@ -343,6 +408,7 @@ async function loadHome({reset = !state.homeLoaded} = {}) {
   if (reset) {
     state.homeCursor = null;
     state.homeHasMore = false;
+    state.homeViewerFollowsAny = null;
     state.posts = [];
     state.moments = [];
     state.homeLoaded = false;
@@ -368,6 +434,7 @@ async function loadHome({reset = !state.homeLoaded} = {}) {
     }
     state.homeCursor = feed?.nextCursor || null;
     state.homeHasMore = Boolean(feed?.hasMore && state.homeCursor);
+    state.homeViewerFollowsAny = typeof feed?.viewerFollowsAny === "boolean" ? feed.viewerFollowsAny : state.followingIds.length > 0;
     if (momentResult) {
       state.moments = Array.isArray(momentResult?.moments) ? momentResult.moments : [];
     }
@@ -613,7 +680,7 @@ function categoryChips(kind, selected) {
 
 function momentCard(m, own = false) {
   const label = own ? "Your Moment" : (m.authorSnapshot?.displayName || m.author?.displayName || m.displayName || m.username || "Following");
-  return `<button class="moment-card ${own ? "own" : ""}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring"><div class="moment-avatar">${avatar(m.authorSnapshot || m.author || m,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
+  return `<button class="moment-card ${own ? "own has-moment" : "has-moment"}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring"><div class="moment-avatar">${avatar(m.authorSnapshot || m.author || m,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
 }
 
 function renderPostCard(p) {
@@ -637,7 +704,7 @@ function renderPostCard(p) {
           if (mediaType.startsWith("video/")) {
             return `<figure class="post-carousel-slide" role="group" aria-label="${index + 1} of ${mediaCount}"><video src="${esc(m.url)}" controls playsinline preload="none" aria-label="${esc(label)}"></video></figure>`;
           }
-          return `<figure class="post-carousel-slide" role="group" aria-label="${index + 1} of ${mediaCount}"><img src="${esc(m.url)}" alt="${esc(label)}" loading="eager" fetchpriority="${Number(p.feedIndex) === 0 && index === 0 ? "high" : "auto"}" decoding="async"></figure>`;
+          return `<figure class="post-carousel-slide" role="group" aria-label="${index + 1} of ${mediaCount}"><img src="${esc(m.url)}" alt="${esc(label)}" loading="${index === mediaIndex ? "eager" : "lazy"}" fetchpriority="${Number(p.feedIndex) === 0 && index === 0 ? "high" : "auto"}" decoding="async"></figure>`;
         }).join("")}
       </div>
     </div>
@@ -645,12 +712,39 @@ function renderPostCard(p) {
   </div>` : (Array.isArray(p.mediaIds) && p.mediaIds.length
     ? `<button class="media-placeholder" type="button" data-action="load-post-media" data-id="${esc(p.id)}">${icon("camera",17)}<span>${p.mediaLoading ? "Loading media…" : p.mediaLoadError ? "Retry loading media" : `Load ${p.mediaIds.length > 1 ? `${p.mediaIds.length} media items` : "media"}`}</span></button>` : "");
   const expanded = Boolean(p.textExpanded);
-  const showToggle = String(p.text || "").trim().length > 90;
+  const captionText = String(p.text || "").trim();
+  const showToggle = captionText.length > 45 || captionText.includes("\n");
   return `<article class="post-card modern-post" data-post-id="${esc(p.id)}">
     <header class="post-head">${avatar(author,"md",true)}<div class="grow"><strong>${esc(author.displayName || "Community member")}</strong><span>${esc(author.username ? `@${author.username}` : "Community")} · ${when(p.createdAt)}</span></div>${uidOf(p) === state.user.uid ? `<button class="icon-btn" type="button" data-action="post-menu" data-id="${esc(p.id)}" aria-label="Post options">${icon("menuDots",19)}</button>` : `<button class="post-follow" type="button" data-action="${state.followingIds.includes(String(uidOf(p))) ? "unfollow-user" : "follow-user"}" data-id="${esc(uidOf(p))}" aria-label="${followLabel(uidOf(p))}">${followLabel(uidOf(p))}</button>`}</header>
-    <div class="post-body">${mediaHtml}${p.text ? `<p class="post-caption ${expanded ? "expanded" : "collapsed"}">${esc(p.text)}</p>${showToggle ? `<button class="post-text-toggle" type="button" data-action="toggle-post-text" data-id="${esc(p.id)}">${expanded ? "Show less" : "Show more"}</button>` : ""}` : ""}</div>
+    <div class="post-body">${mediaHtml}${p.text ? `<p id="post-caption-${esc(p.id)}" class="post-caption ${expanded ? "expanded" : "collapsed"}">${postTextHtml(p.text)}</p>${showToggle ? `<button class="post-text-toggle" type="button" data-action="toggle-post-text" data-id="${esc(p.id)}" aria-expanded="${expanded}" aria-controls="post-caption-${esc(p.id)}">${expanded ? "Show less" : "Show more"}</button>` : ""}` : ""}</div>
     <footer class="post-actions"><button class="${p.likedByViewer ? "is-active" : ""}" type="button" data-action="like-post" data-id="${esc(p.id)}" aria-pressed="${Boolean(p.likedByViewer)}">${icon("heart",18)}${p.likedByViewer ? "Liked" : "Like"} <span>${Number(p.reactionCount || 0) || ""}</span></button><button type="button" data-action="comment-post" data-id="${esc(p.id)}">${icon("comment",18)}Comment <span>${Number(p.commentCount || 0) || ""}</span></button><button class="${p.savedByViewer ? "is-active" : ""}" type="button" data-action="save-post" data-id="${esc(p.id)}" aria-pressed="${Boolean(p.savedByViewer)}">${icon("bookmark",18)}${p.savedByViewer ? "Saved" : "Save"}</button><button type="button" data-action="share-post" data-id="${esc(p.id)}">${icon("arrow",18)}Share</button></footer>
   </article>`;
+}
+
+function renderDiscoveryBanner() {
+  if (!shouldShowDiscoveryBanner()) return "";
+  return `<section class="discovery-banner" aria-label="Discover more on Marvel Chat">
+    <div class="discovery-banner-glimmer discovery-glimmer-one" aria-hidden="true"></div>
+    <div class="discovery-banner-glimmer discovery-glimmer-two" aria-hidden="true"></div>
+    <button class="discovery-banner-dismiss" type="button" data-action="dismiss-discovery-banner" aria-label="Dismiss discovery banner">${icon("close",16)}</button>
+    <div class="discovery-banner-intro">
+      <span class="discovery-banner-kicker">A LITTLE MORE TO EXPLORE</span>
+      <h2>Find your next favourite thing.</h2>
+      <p>Shop useful finds and discover people with skills worth knowing.</p>
+    </div>
+    <div class="discovery-banner-options">
+      <button class="discovery-option discovery-option-market" type="button" data-action="route-market">
+        <span class="discovery-option-art discovery-market-art" aria-hidden="true"><span class="discovery-art-orbit"></span><span class="discovery-art-icon">${icon("market",25)}</span><span class="discovery-art-spark">✦</span></span>
+        <span class="discovery-option-copy"><strong>Explore Marvel Market</strong><small>Discover products and shops</small></span>
+        <span class="discovery-option-arrow">${icon("arrow",16)}</span>
+      </button>
+      <button class="discovery-option discovery-option-skills" type="button" data-action="route-skills">
+        <span class="discovery-option-art discovery-skills-art" aria-hidden="true"><span class="discovery-art-orbit"></span><span class="discovery-art-icon">${icon("skills",25)}</span><span class="discovery-art-spark">✦</span></span>
+        <span class="discovery-option-copy"><strong>Explore Marvel Skills</strong><small>Meet talented providers</small></span>
+        <span class="discovery-option-arrow">${icon("arrow",16)}</span>
+      </button>
+    </div>
+  </section>`;
 }
 
 function renderHome() {
@@ -659,14 +753,19 @@ function renderHome() {
   const feedBody = state.posts.length ? state.posts.map(renderPostCard).join("") :
     (state.homeLoading ? `<div class="feed-loader" role="status">${icon("spinner",18)} Loading community updates…</div>` :
       state.homeError ? emptyState("Your feed could not load", state.homeError, "retry-home", "Try again") :
-      emptyState("Your feed is quiet", "Public community posts and updates from people you follow will appear here.", "create-post", "Create a post"));
+      state.homeViewerFollowsAny === false
+        ? emptyState("Start with people and posts", "Search for people to follow. Their posts and Moments will appear here.", "route-search", "Find people and posts")
+        : emptyState("Your feed is quiet", "Public community posts and updates from people you follow will appear here.", "create-post", "Create a post"));
   const paging = state.homeLoading && state.posts.length
     ? `<div class="feed-loader" role="status">${icon("spinner",18)} Loading more posts…</div>`
     : state.homeHasMore ? `<div id="home-page-sentinel" class="pagination-sentinel"><button class="btn btn-secondary" type="button" data-action="load-more-home">Load more posts</button></div>`
-    : state.homeLoaded && state.posts.length ? `<p class="end-of-feed">You’re all caught up.</p>` : "";
+    : state.homeLoaded && state.homeViewerFollowsAny === false
+      ? `<div class="feed-follow-prompt"><strong>${state.posts.length >= 6 ? "You’ve seen the latest six public posts." : "You’ve reached the end of the available public posts."}</strong><p>Follow people to see their new posts and Moments. Search for a person or post to find someone to follow.</p><button class="btn btn-primary" type="button" data-action="route-search">Search people and posts</button></div>`
+      : state.homeLoaded && state.posts.length ? `<p class="end-of-feed">You’re all caught up.</p>` : "";
   return `<section class="screen home-screen">
-    <section class="home-moments"><div class="section-head compact"><div><span class="eyebrow">MOMENTS</span><h2>Stories & updates</h2></div><button class="text-button" type="button" data-action="create-moment">Create</button></div><div class="moments-row">${own ? momentCard(own,true) : `<button class="moment-card own" type="button" data-action="create-moment"><div class="moment-ring add-ring">${avatar(state.profile || state.user,"md",true)}<span class="add-badge">${icon("plus",13)}</span></div><span class="moment-label">Add a Moment</span></button>`}${following.map((m) => momentCard(m)).join("")}</div></section>
-    ${contextualSearch("home-search-form","Search people, skills, products, or shops…","all",state.searchQuery)}
+    ${renderDiscoveryBanner()}
+    <section class="home-moments"><div class="section-head compact"><div><span class="eyebrow">MOMENTS</span><h2>Stories & updates</h2></div><button class="text-button" type="button" data-action="create-moment">Create</button></div><div class="moments-row">${own ? momentCard(own,true) : `<button class="moment-card own" type="button" data-action="create-moment"><div class="moment-ring add-ring"><div class="moment-avatar">${avatar(state.profile || state.user,"md",true)}</div><span class="add-badge">${icon("plus",13)}</span></div><span class="moment-label">Add a Moment</span></button>`}${following.map((m) => momentCard(m)).join("")}</div></section>
+    ${contextualSearch("home-search-form","Search people and posts…","people_posts",state.searchQuery)}
     ${state.homeSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">SEARCH</span><h2>Matches</h2></div><button class="text-button" type="button" data-action="clear-home-search">Clear</button></div><div class="results">${state.homeSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}
     <section class="section feed-section"><div class="section-head compact"><div><span class="eyebrow">COMMUNITY FEED</span><h2>Latest updates</h2></div></div>${feedBody}${paging}</section>
     <button class="fab" type="button" data-action="create-menu" aria-label="Create"><span>${icon("plus",23)}</span></button>
@@ -852,6 +951,14 @@ async function legalBody(type) {
     });
   });
   main.querySelector("header")?.remove();
+  main.querySelectorAll('a[data-return-marvel], a[href="./"], a[href="/"]').forEach((link) => {
+    const button = parsed.createElement("button");
+    button.type = "button";
+    button.className = link.className || "legal-return-button";
+    button.dataset.action = "close-modal";
+    button.textContent = link.textContent || "Return to Marvel Chat";
+    link.replaceWith(button);
+  });
   main.querySelector("h1")?.remove();
   main.querySelector(".meta")?.remove();
   main.querySelector(":scope > p")?.remove();
@@ -944,13 +1051,28 @@ function paint() {
     app.innerHTML = authScreen();
     return;
   }
+  // Capture the actual scroll offset before replacing the feed DOM. Keeping a
+  // pixel ratio (not merely the rounded slide number) avoids snapping a user's
+  // finger back to slide one when a signed URL finishes loading mid-swipe.
+  const carouselOffsets = new Map();
+  app.querySelectorAll("[data-post-carousel-track]").forEach((track) => {
+    if (!track.dataset.id || !track.clientWidth) return;
+    const ratio = track.scrollLeft / track.clientWidth;
+    carouselOffsets.set(String(track.dataset.id), ratio);
+    const post = [...state.posts, ...state.savedPosts].find((item) => String(item.id) === String(track.dataset.id));
+    if (post) post.mediaIndex = Math.max(0, Math.min((post.mediaIds || []).length - 1, Math.round(ratio)));
+  });
   app.innerHTML = shell((viewMap[state.route] || renderHome)(), state.route === "chat" && Boolean(state.activeThreadId));
   bindHomePagination();
   bindCatalogueMedia();
-  // Preserve the selected carousel slide across Like/Save and other repaint actions.
   app.querySelectorAll("[data-post-carousel-track]").forEach((track) => {
-    const index = Math.max(0, Number(track.dataset.startIndex || 0));
-    if (index > 0) requestAnimationFrame(() => { track.scrollLeft = index * track.clientWidth; });
+    const savedRatio = carouselOffsets.get(String(track.dataset.id));
+    const fallbackIndex = Math.max(0, Number(track.dataset.startIndex || 0));
+    const ratio = Number.isFinite(savedRatio) ? savedRatio : fallbackIndex;
+    requestAnimationFrame(() => {
+      if (!track.isConnected || !track.clientWidth) return;
+      track.scrollLeft = Math.max(0, ratio * track.clientWidth);
+    });
   });
 }
 
@@ -997,12 +1119,31 @@ async function signup(form) {
 function openCreatePost() {
   state.pendingMediaFile = null;
   state.pendingMediaFiles = [];
-  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><div class="upload-action-row post-upload-row"><button class="btn btn-secondary" type="button" data-action="pick-post-media">${icon("camera",18)}Choose photos or videos from gallery</button><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Up to 10 items. Each item must be 2 MiB or smaller after compression; shared daily limit is 4 MiB. Compression results show the exact KB saved.</small></div><div id="post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
+  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea id="post-text" name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label>${postFormatToolbar("post-text")}<label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><div class="upload-action-row post-upload-row"><button class="btn btn-secondary" type="button" data-action="pick-post-media">${icon("camera",18)}Choose photos or videos from gallery</button><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Up to 10 items. Each item must be 2 MiB or smaller after compression; shared daily limit is 2 MiB. Compression results show the exact KB saved.</small></div><div id="post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
+}
+
+async function openPostEditor(post) {
+  state.pendingEditMediaFiles = [];
+  state.pendingEditMediaProcessing = false;
+  const mediaIds = Array.isArray(post.mediaIds) ? post.mediaIds.slice(0, 10) : [];
+  if (mediaIds.length) {
+    try { await hydratePostMedia(post, mediaIds.map((_, index) => index)); }
+    catch (error) { console.debug("[Marvel Chat] edit media preview unavailable", error?.code || error?.message); }
+  }
+  const keepMediaMarkup = mediaIds.length ? mediaIds.map((mediaId, index) => {
+    const media = post.mediaUrls?.[index];
+    const isVideo = String(media?.contentType || "").startsWith("video/");
+    const preview = media?.url
+      ? (isVideo ? `<video src="${esc(media.url)}" muted playsinline preload="metadata"></video>` : `<img src="${esc(media.url)}" alt="Existing post media ${index + 1}" loading="lazy">`)
+      : `<span>Media ${index + 1}</span>`;
+    return `<label class="edit-media-item"><input type="checkbox" name="keepMediaIds" value="${esc(mediaId)}" checked><span class="edit-media-thumb">${preview}</span><span>Keep media ${index + 1}</span></label>`;
+  }).join("") : `<p class="muted">This post has no existing media.</p>`;
+  modal("Edit post",`<form id="edit-post-form" class="form-stack compact-form"><input type="hidden" name="postId" value="${esc(post.id)}"><label class="floating-field"><textarea id="edit-post-text" name="text" maxlength="5000" placeholder=" ">${esc(post.text || "")}</textarea><span>Post text</span></label>${postFormatToolbar("edit-post-text")}<label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${post.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${post.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${post.visibility === "private" ? "selected" : ""}>Private</option></select></label><section class="edit-existing-media"><strong>Existing photos and videos</strong><small>Untick an item to remove it from this post.</small><div class="edit-existing-media-grid">${keepMediaMarkup}</div></section><div class="upload-action-row"><button class="btn btn-secondary" type="button" data-action="pick-edit-post-media">${icon("camera",18)}Add photos or videos</button><input id="edit-post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Add up to 10 media items total. Images are compressed before upload.</small></div><div id="edit-post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post" data-id="${esc(post.id)}">Save changes</button>`,{wide:true});
 }
 
 function openCreateMoment() {
   state.pendingMomentFile = null;
-  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo</option><option value="photo_text">Photo + text</option><option value="video">Video</option><option value="video_text">Video + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><div class="upload-action-row"><button class="btn btn-secondary" type="button" data-action="pick-moment-media">${icon("camera",18)}Choose photo or video from gallery</button><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" hidden><small>Choose one photo or video. Images are compressed before upload; each item is limited to 2 MiB and the shared daily limit is 4 MiB.</small></div><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
+  modal("Create Moment",`<form id="moment-form" class="form-stack compact-form"><label class="select-field"><span>Moment type</span><select id="moment-content-type" name="contentType"><option value="text">Text</option><option value="photo">Photo</option><option value="photo_text">Photo + text</option><option value="video">Video</option><option value="video_text">Video + text</option></select></label><label class="floating-field"><textarea name="text" maxlength="1500" placeholder=" "></textarea><span>Moment text</span></label><div class="upload-action-row"><button class="btn btn-secondary" type="button" data-action="pick-moment-media">${icon("camera",18)}Choose photo or video from gallery</button><input id="moment-photo" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" hidden><small>Choose one photo or video. Images are compressed before upload; each item is limited to 2 MiB and the shared daily limit is 2 MiB.</small></div><div id="moment-photo-preview" class="post-photo-preview"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-moment">Publish</button>`);
 }
 
 async function openComment(postId) {
@@ -1119,6 +1260,7 @@ app.addEventListener("scroll", (event) => {
   if (!carousel || !track.clientWidth) return;
   const count = Math.max(1, Number(carousel.dataset.count || 1));
   const index = Math.max(0, Math.min(count - 1, Math.round(track.scrollLeft / track.clientWidth)));
+  track.dataset.currentIndex = String(index);
   carousel.dataset.index = String(index);
   const counter = carousel.querySelector("[data-carousel-count]");
   if (counter) counter.textContent = `${index + 1} / ${count}`;
@@ -1132,7 +1274,17 @@ app.addEventListener("scroll", (event) => {
   const post = [...state.posts, ...state.savedPosts].find((item) => item.id === track.dataset.id);
   if (post) {
     post.mediaIndex = index;
-    void hydratePostMedia(post, [index - 1, index, index + 1]);
+    const timerKey = String(post.id);
+    const previousTimer = carouselHydrationTimers.get(timerKey);
+    if (previousTimer) clearTimeout(previousTimer);
+    carouselHydrationTimers.set(timerKey, setTimeout(() => {
+      carouselHydrationTimers.delete(timerKey);
+      const latest = [...state.posts, ...state.savedPosts].find((item) => item.id === track.dataset.id);
+      const chosen = Number(track.dataset.currentIndex || 0);
+      if (latest && state.route === "home" || (latest && state.route === "saved-posts")) {
+        void hydratePostMedia(latest, [chosen - 1, chosen, chosen + 1]);
+      }
+    }, 220));
   }
 }, true);
 
@@ -1147,6 +1299,7 @@ document.addEventListener("click", async (e) => {
   const a = actionEl.dataset.action;
   try {
     if (a === "close-modal") { clearTimeout(momentAutoCloseTimer); closeModal(); return; }
+    if (a === "dismiss-discovery-banner") { discoveryBannerVisibleForUser = false; paint(); return; }
     if (a === "auth-welcome") { authMode="welcome"; paint(); return; }
     if (a === "auth-signin") { authMode="signin"; paint(); return; }
     if (a === "auth-signup") { authMode="signup"; paint(); return; }
@@ -1218,8 +1371,33 @@ document.addEventListener("click", async (e) => {
     if (a === "submit-post") { if (state.pendingMediaProcessing) { toast("Please wait until media compression finishes.", "error"); return; } const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; state.pendingMediaProcessing=false; closeModal(); toast("Post published.","success"); await loadHome({reset: true}); paint(); return; }
     if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); let contentType=String(d.contentType || "text"); const text=String(d.text || "").trim(); const needsMedia=["photo","photo_text","video","video_text"].includes(contentType); if(needsMedia && !state.pendingMomentFile){toast("Choose a photo or video for this Moment.","error");return;} if(state.pendingMomentFile){const selectedVideo=state.pendingMomentFile.type.startsWith("video/"); if(selectedVideo && !contentType.startsWith("video")) contentType=text ? "video_text" : "video"; if(!selectedVideo && !contentType.startsWith("photo")) contentType=text ? "photo_text" : "photo";} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentMedia(state.pendingMomentFile); await api.createMoment({contentType,text,mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome({reset: true}); paint(); return; }
     if (a === "post-menu") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Post options",`<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="edit-post" data-id="${esc(p.id)}">Edit post</button><button class="btn btn-secondary btn-block" type="button" data-action="delete-post" data-id="${esc(p.id)}">Delete post</button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`); return; }
-    if (a === "edit-post") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Edit post",`<form id="edit-post-form" class="form-stack"><input type="hidden" name="postId" value="${esc(p.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(p.text || "")}</textarea><span>Post text</span></label><label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${p.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${p.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${p.visibility === "private" ? "selected" : ""}>Private</option></select></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post">Save</button>`); return; }
-    if (a === "submit-edit-post") { const d=Object.fromEntries(new FormData(document.getElementById("edit-post-form"))); await api.updatePost({postId:d.postId,text:String(d.text || "").trim(),visibility:d.visibility}); closeModal(); toast("Post updated.","success"); await loadHome({reset: true}); paint(); return; }
+    if (a === "edit-post") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(!p)return; await openPostEditor(p); return; }
+    if (a === "format-post-bold" || a === "format-post-normal") { applyPostTextFormatting(actionEl.dataset.target, a === "format-post-bold" ? "bold" : "normal"); return; }
+    if (a === "pick-edit-post-media") { document.getElementById("edit-post-media")?.click(); return; }
+    if (a === "submit-edit-post") {
+      if (state.pendingEditMediaProcessing) { toast("Please wait until media compression finishes.", "error"); return; }
+      const form = document.getElementById("edit-post-form");
+      const data = new FormData(form);
+      const postId = String(data.get("postId") || actionEl.dataset.id || "");
+      const text = String(data.get("text") || "").trim();
+      const keptMediaIds = data.getAll("keepMediaIds").map(String);
+      const addedFiles = Array.isArray(state.pendingEditMediaFiles) ? state.pendingEditMediaFiles : [];
+      if (keptMediaIds.length + addedFiles.length > 10) { toast("A post can contain at most 10 photos or videos.", "error"); return; }
+      if (!text && keptMediaIds.length + addedFiles.length === 0) { toast("A post must contain text or media.", "error"); return; }
+      const originalPost = [...state.posts, ...state.savedPosts].find((item) => item.id === postId);
+      const oldIds = Array.isArray(originalPost?.mediaIds) ? originalPost.mediaIds : [];
+      const uploadedIds = addedFiles.length ? await uploadHomeMediaFiles(addedFiles) : [];
+      const nextIds = [...keptMediaIds, ...uploadedIds];
+      await api.updatePost({postId, text, mediaIds:nextIds, visibility:String(data.get("visibility") || "public")});
+      const removedIds = oldIds.filter((id) => !nextIds.includes(id));
+      if (removedIds.length) {
+        try { await api.cleanupDeletedMedia({feature:"home_post", parentId:postId, parentCollection:"posts", mediaIds:removedIds}); }
+        catch (error) { console.debug("[Marvel Chat] removed post media cleanup pending", error?.code || error?.message); }
+      }
+      state.pendingEditMediaFiles = []; state.pendingEditMediaProcessing = false;
+      state.savedPostsLoaded = false;
+      closeModal(); toast("Post updated.","success"); await loadHome({reset:true}); paint(); return;
+    }
     if (a === "delete-post") { const deletedId=actionEl.dataset.id; const oldPost=state.posts.find((post)=>post.id===deletedId) || state.savedPosts.find((post)=>post.id===deletedId); await api.deletePost({postId:deletedId}); state.savedPosts=state.savedPosts.filter((post)=>post.id!==deletedId); state.posts=state.posts.filter((post)=>post.id!==deletedId); state.savedPostsLoaded=false; if(Array.isArray(oldPost?.mediaIds) && oldPost.mediaIds.length){try{await api.cleanupDeletedMedia({feature:"home_post",parentId:deletedId,parentCollection:"posts"});}catch(cleanupError){console.error("[Marvel Chat] deleted post media cleanup pending",cleanupError?.code);}} closeModal(); toast("Post deleted.","success"); await loadHome({reset: true}); paint(); return; }
     if (a === "like-post") {
       const postId = actionEl.dataset.id;
@@ -1314,7 +1492,7 @@ document.addEventListener("click", async (e) => {
     if (a === "delete-message") { await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode:"for_everyone"});toast("Message deleted.","success");return; }
     if (a === "message-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); const profile=item?.result || item || {}; const derivedUsername = profile.username || String(item?.subtitle || "").replace(/^@/, ""); state.threadPeers[target]={uid:target,displayName:item?.title || profile.displayName || derivedUsername || "Conversation",username:derivedUsername,photoURL:profile.photoURL || null};saveThreadPeers(); const id=await findOrCreateDirectThread(target,state.threadPeers[target]); state.route="chat";state.activeThreadId=id;await loadThreads();paint();await loadMessages(id);return; }
     if (a === "view-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); await openPublicUserProfile(target,item || {}); return; }
-    if (a === "follow-user" || a === "unfollow-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const current=await api.getFollowState({targetUid:target}); if(current?.following){await api.unfollowUser({targetUid:target});state.followingIds=state.followingIds.filter((id)=>String(id)!==String(target));toast("No longer following.","success");}else{await api.followUser({targetUid:target});state.followingIds=[...new Set([...state.followingIds,String(target)])];toast("Following.","success");} paint(); return; }
+    if (a === "follow-user" || a === "unfollow-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const current=await api.getFollowState({targetUid:target}); if(current?.following){await api.unfollowUser({targetUid:target});state.followingIds=state.followingIds.filter((id)=>String(id)!==String(target));toast("No longer following.","success");}else{await api.followUser({targetUid:target});state.followingIds=[...new Set([...state.followingIds,String(target)])];toast("Following.","success");} if(state.route === "home"){await loadHome({reset:true});} paint(); return; }
     if (a === "skill-view" || a === "skill-search-view") { const s=state.skills.find((x)=>x.id===actionEl.dataset.id) || [...state.searchResults,...state.homeSearchResults].find((x)=>x.id===actionEl.dataset.id); if(s){const listing=s.result || s;await hydrateSkillListingMedia(listing);openSkillListing(listing);}return; }
     if (a === "request-skill") { const listing=state.skills.find((x)=>x.id===actionEl.dataset.id) || [...state.searchResults,...state.homeSearchResults].map((x)=>x.result || x).find((x)=>x.id===actionEl.dataset.id); if(!listing)return; modal("Request this service",`<form id="skill-request-form" class="form-stack"><input type="hidden" name="listingId" value="${esc(listing.id)}"><label class="floating-field"><input name="title" value="Request: ${esc(listing.title || "service")}" maxlength="160" required placeholder=" "><span>Request title</span></label><label class="floating-field"><textarea name="description" maxlength="3000" required placeholder=" "></textarea><span>What do you need?</span></label><label class="floating-field"><input name="budgetMinMinor" type="number" min="0" placeholder=" "><span>Minimum budget (minor units)</span></label><label class="floating-field"><input name="budgetMaxMinor" type="number" min="0" placeholder=" "><span>Maximum budget (minor units)</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-skill-request">Send request</button>`,{wide:true});return; }
     if (a === "submit-skill-request") { const d=Object.fromEntries(new FormData(document.getElementById("skill-request-form"))); await api.createSkillRequest({title:String(d.title || "").trim(),description:String(d.description || "").trim(),listingId:d.listingId,currency:"NGN",budgetMinMinor:d.budgetMinMinor ? safeMinor(d.budgetMinMinor) : null,budgetMaxMinor:d.budgetMaxMinor ? safeMinor(d.budgetMaxMinor) : null}); closeModal();toast("Skill request sent.","success");return; }
@@ -1460,12 +1638,16 @@ document.addEventListener("change", async (e) => {
       box.innerHTML = `<img src="${state.pendingProfilePhotoPreview}" alt="Profile photo preview">`;
     }
   }
-  if (input?.id === "post-media" && input.files) {
-    const box = document.getElementById("post-media-preview");
+  if ((input?.id === "post-media" || input?.id === "edit-post-media") && input.files) {
+    const isEditing = input.id === "edit-post-media";
+    const box = document.getElementById(isEditing ? "edit-post-media-preview" : "post-media-preview");
+    const filesStateKey = isEditing ? "pendingEditMediaFiles" : "pendingMediaFiles";
+    const processingKey = isEditing ? "pendingEditMediaProcessing" : "pendingMediaProcessing";
     try {
       const files = validateHomeFiles(input.files);
-      state.pendingMediaProcessing = true;
-      state.pendingMediaFiles = [];
+      if (files.length > 10) throw new Error("Choose up to 10 media items at a time.");
+      state[processingKey] = true;
+      state[filesStateKey] = [];
       if (box) {
         box.querySelectorAll("img,video").forEach((media) => {
           const url = media.getAttribute("src") || "";
@@ -1473,32 +1655,21 @@ document.addEventListener("change", async (e) => {
         });
         box.innerHTML = `<div class="media-processing" role="status">${icon("spinner",18)} Optimizing ${files.length} media item${files.length === 1 ? "" : "s"} for upload…</div>`;
       }
-
       const preparedItems = [];
-      // Process sequentially to avoid exhausting memory on mid-range phones.
       for (const original of files) {
         const optimized = await prepareMediaFile(original);
         if (optimized.size > MAX_MEDIA_BYTES) {
           throw new Error(`${original.name}: this media is still over 2 MiB after compression. Please choose a smaller file.`);
         }
         preparedItems.push({original, optimized});
-        if (box) {
-          const done = preparedItems.length;
-          box.innerHTML = `<div class="media-processing" role="status">${icon("spinner",18)} Compressed ${done} of ${files.length} media items…</div>`;
-        }
+        if (box) box.innerHTML = `<div class="media-processing" role="status">${icon("spinner",18)} Compressed ${preparedItems.length} of ${files.length} media items…</div>`;
       }
-
       const totalBytes = preparedItems.reduce((sum, item) => sum + item.optimized.size, 0);
-      if (totalBytes > DAILY_MEDIA_BYTES) {
-        throw new Error(`The selected files total ${formatMiB(totalBytes)} after compression. The daily upload limit is 4.00 MiB.`);
-      }
+      if (totalBytes > DAILY_MEDIA_BYTES) throw new Error(`The selected files total ${formatMiB(totalBytes)} after compression. The daily upload limit is 2.00 MiB.`);
       const usage = await api.getMyMediaDailyUsage({});
       const remainingBytes = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
-      if (totalBytes > remainingBytes) {
-        throw new Error(`You have reached your daily media limit. ${formatMiB(remainingBytes)} remaining; this selection needs ${formatMiB(totalBytes)}. The daily limit is 4.00 MiB.`);
-      }
-
-      state.pendingMediaFiles = preparedItems.map((item) => item.optimized);
+      if (totalBytes > remainingBytes) throw new Error(`You have reached your daily media limit. ${formatMiB(remainingBytes)} remaining; this selection needs ${formatMiB(totalBytes)}. The daily limit is 2.00 MiB.`);
+      state[filesStateKey] = preparedItems.map((item) => item.optimized);
       if (box) {
         box.innerHTML = preparedItems.map(({original, optimized}) => {
           const url = URL.createObjectURL(optimized);
@@ -1506,15 +1677,15 @@ document.addEventListener("change", async (e) => {
             ? `<video src="${esc(url)}" muted playsinline preload="metadata" aria-label="Optimized video preview"></video>`
             : `<img src="${esc(url)}" alt="Optimized preview of ${esc(original.name)}" decoding="async">`;
           const savedBytes = Math.max(0, original.size - optimized.size);
-          const percent = original.size ? Math.max(0, (savedBytes / original.size) * 100) : 0;
+          const percent = original.size ? (savedBytes / original.size) * 100 : 0;
           const summary = optimized.size < original.size
             ? `${formatKB(original.size)} → ${formatKB(optimized.size)} · saved ${percent.toFixed(1)}%`
-            : `${formatKB(optimized.size)} · no further compression needed`;
+            : `${formatKB(original.size)} · no further compression needed`;
           return `<article class="selected-media"><div class="selected-media-preview">${visual}</div><div class="selected-media-copy"><strong>${esc(original.name)}</strong><small>${summary}</small><small>${optimized.type.startsWith("video/") ? "Video" : "Image"} · max 2 MiB per item</small></div></article>`;
-        }).join("") + `<p class="media-quota-note">Selection: ${formatMiB(totalBytes)} · daily limit: 4.00 MiB · remaining before upload: ${formatMiB(remainingBytes - totalBytes)}</p>`;
+        }).join("") + `<p class="media-quota-note">Added selection: ${formatMiB(totalBytes)} · daily limit: 2.00 MiB · remaining before upload: ${formatMiB(remainingBytes - totalBytes)}</p>`;
       }
     } catch (error) {
-      state.pendingMediaFiles = [];
+      state[filesStateKey] = [];
       input.value = "";
       if (box) {
         box.querySelectorAll("img,video").forEach((media) => {
@@ -1525,7 +1696,7 @@ document.addEventListener("change", async (e) => {
       }
       toast(error.message || "Media optimization failed.", "error");
     } finally {
-      state.pendingMediaProcessing = false;
+      state[processingKey] = false;
     }
   }
 
@@ -1558,7 +1729,7 @@ document.addEventListener("change", async (e) => {
       const usage = await api.getMyMediaDailyUsage({});
       const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
       if (optimized.size > remaining) {
-        throw new Error(`You have reached your daily media limit. ${formatMiB(remaining)} remaining; this item needs ${formatMiB(optimized.size)}. The daily limit is 4.00 MiB.`);
+        throw new Error(`You have reached your daily media limit. ${formatMiB(remaining)} remaining; this item needs ${formatMiB(optimized.size)}. The daily limit is 2.00 MiB.`);
       }
       state.pendingMomentFile = optimized;
       const contentSelect=document.getElementById("moment-content-type");
@@ -1571,7 +1742,7 @@ document.addEventListener("change", async (e) => {
         const visual=optimized.type.startsWith("video/") ? `<video src="${esc(previewUrl)}" controls playsinline preload="metadata" aria-label="Optimized Moment video preview"></video>` : `<img src="${esc(previewUrl)}" alt="Optimized Moment photo preview" decoding="async">`;
         const saving=Math.max(0, original.size-optimized.size);
         const pct=original.size ? Math.max(0,(saving/original.size)*100) : 0;
-        box.innerHTML=`${visual}<small class="media-compression-result">${formatKB(original.size)} → ${formatKB(optimized.size)}${saving ? ` · saved ${pct.toFixed(1)}%` : " · no further compression needed"}. Per item: 2 MiB max; daily total: 4 MiB.</small>`;
+        box.innerHTML=`${visual}<small class="media-compression-result">${formatKB(original.size)} → ${formatKB(optimized.size)}${saving ? ` · saved ${pct.toFixed(1)}%` : " · no further compression needed"}. Per item: 2 MiB max; daily total: 2 MiB.</small>`;
       }
     } catch (error) {
       input.value = "";
@@ -1590,7 +1761,7 @@ document.addEventListener("submit", async (e) => {
     if(f.id === "signin-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));await persistenceReady;try{await signInWithEmailAndPassword(auth,String(d.email).trim(),String(d.password));}catch(err){console.error("[Marvel Chat] email sign-in",err?.code,err?.message);throw err;}return;}
     if(f.id === "forgot-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));await sendPasswordResetEmail(auth,String(d.email).trim());toast("If an account matches that email, a reset link is on its way.","success");return;}
     if(f.id === "message-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));const text=String(d.text || "").trim();if(!text)return;await api.sendMessage({threadId:state.activeThreadId,text});f.reset();return;}
-    if(f.id === "home-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();if(state.searchQuery.length<2){state.homeSearchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:"all"});state.homeSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
+    if(f.id === "home-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();if(state.searchQuery.length<2){state.homeSearchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:"people_posts"});state.homeSearchResults=Array.isArray(r?.results)?r.results.filter((item)=>["user","person","post"].includes(String(item?.type||"").toLowerCase())):[];paint();return;}
     if(f.id === "chat-person-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.chatSearchQuery=String(d.query || "").trim();if(state.chatSearchQuery.length<2){state.chatSearchResults=[];paint();return;}const r=await api.search({query:state.chatSearchQuery,scope:"users"});state.chatSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "skills-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.skillsSearchQuery=String(d.query || "").trim();paint();return;}
     if(f.id === "search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.searchScope=String(d.scope || "all");if(state.searchQuery.length<2){state.searchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:state.searchScope});state.searchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
@@ -1611,17 +1782,18 @@ onAuthStateChanged(auth, async (user) => {
   clearSubscriptions();
   const previousUid = state.user?.uid || "";
   state.user = user;
+  if (previousUid !== (user?.uid || "")) discoveryBannerVisibleForUser = null;
   state.activeThreadId = null;
   state.messages = [];
   if (!user) {
     state.profile = null; state.skillProfile = null; state.myStore = null;
-    state.posts = []; state.moments = []; state.homeCursor = null; state.homeHasMore = false; state.homeLoaded = false;
+    state.posts = []; state.moments = []; state.homeCursor = null; state.homeHasMore = false; state.homeViewerFollowsAny = null; state.homeLoaded = false;
     state.savedPosts = []; state.savedPostsCursor = null; state.savedPostsHasMore = false; state.savedPostsLoaded = false;
     state.notifications = []; state.unreadNotifications = 0; state.followingIds = [];
     state.route = "home"; authMode = "welcome"; paint(); return;
   }
   if (previousUid !== user.uid) {
-    state.posts = []; state.moments = []; state.homeCursor = null; state.homeHasMore = false; state.homeLoaded = false; state.homeError = "";
+    state.posts = []; state.moments = []; state.homeCursor = null; state.homeHasMore = false; state.homeViewerFollowsAny = null; state.homeLoaded = false; state.homeError = "";
     state.savedPosts = []; state.savedPostsCursor = null; state.savedPostsHasMore = false; state.savedPostsLoaded = false;
     state.notifications = []; state.unreadNotifications = 0; state.followingIds = []; state.followStats = {followersCount: 0, followingCount: 0};
   }
