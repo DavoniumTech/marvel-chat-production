@@ -49,7 +49,43 @@ let catalogueMediaObserver = null;
 const carouselHydrationTimers = new Map();
 let momentAutoCloseTimer = null;
 const DISCOVERY_BANNER_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const DISCOVERY_BANNER_AUTO_DISMISS_MS = 30 * 1000;
 let discoveryBannerVisibleForUser = null;
+let discoveryBannerTimer = null;
+let discoveryBannerCloseTimer = null;
+let discoveryBannerTimerUid = "";
+
+function stopDiscoveryBannerTimer() {
+  if (discoveryBannerTimer) clearTimeout(discoveryBannerTimer);
+  if (discoveryBannerCloseTimer) clearTimeout(discoveryBannerCloseTimer);
+  discoveryBannerTimer = null;
+  discoveryBannerCloseTimer = null;
+  discoveryBannerTimerUid = "";
+}
+
+function syncDiscoveryBannerTimer() {
+  const overlay = app.querySelector("[data-discovery-overlay]");
+  const uid = String(state.user?.uid || "");
+  if (!overlay || !uid || discoveryBannerVisibleForUser !== true) {
+    if (!overlay || !uid || discoveryBannerVisibleForUser !== true) stopDiscoveryBannerTimer();
+    return;
+  }
+  if (discoveryBannerTimer && discoveryBannerTimerUid === uid) return;
+  stopDiscoveryBannerTimer();
+  discoveryBannerTimerUid = uid;
+  discoveryBannerTimer = setTimeout(() => {
+    discoveryBannerTimer = null;
+    discoveryBannerTimerUid = "";
+    if (String(state.user?.uid || "") !== uid) return;
+    app.querySelector("[data-discovery-overlay]")?.classList.add("is-closing");
+    discoveryBannerCloseTimer = setTimeout(() => {
+      discoveryBannerCloseTimer = null;
+      if (String(state.user?.uid || "") !== uid) return;
+      discoveryBannerVisibleForUser = false;
+      paint();
+    }, 420);
+  }, DISCOVERY_BANNER_AUTO_DISMISS_MS);
+}
 
 function shouldShowDiscoveryBanner() {
   if (discoveryBannerVisibleForUser !== null) return discoveryBannerVisibleForUser;
@@ -209,6 +245,14 @@ function stamp(v) { return v?.toDate ? v.toDate().getTime() : new Date(v || 0).g
 function uidOf(x) { return x?.uid || x?.userId || x?.authorUid || x?.creatorUid || x?.ownerUid || ""; }
 function formatKB(bytes) { return `${(Math.max(0, Number(bytes) || 0) / 1024).toFixed(1)} KB`; }
 function formatMiB(bytes) { return `${(Math.max(0, Number(bytes) || 0) / (1024 * 1024)).toFixed(2)} MiB`; }
+function quotaRetryCopy(retryAt) {
+  const retry = retryAt ? new Date(retryAt) : null;
+  if (!retry || !Number.isFinite(retry.getTime())) return "Try again when recent media reaches its 24-hour expiry.";
+  const minutesTotal = Math.ceil(Math.max(0, retry.getTime() - Date.now()) / 60000);
+  const hours = Math.floor(minutesTotal / 60);
+  const minutes = minutesTotal % 60;
+  return `Try again in about ${hours ? `${hours} h ` : ""}${minutes} min (around ${retry.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})}).`;
+}
 function postTextHtml(value) {
   // Escaping happens before limited **bold** markup is introduced, so user HTML
   // cannot become executable markup. Newlines remain visible via pre-wrap CSS.
@@ -395,7 +439,8 @@ async function loadProfile() {
     const stats = await api.getFollowState({targetUid: state.user.uid});
     state.followStats = {
       followersCount: Number(stats?.followersCount || 0),
-      followingCount: Number(stats?.followingCount || 0)
+      followingCount: Number(stats?.followingCount || 0),
+      postCount: Number(stats?.postCount ?? state.profile.postCount ?? state.profile.postsCount ?? 0)
     };
   } catch {}
 }
@@ -457,6 +502,45 @@ async function loadHome({reset = !state.homeLoaded} = {}) {
   }
 }
 
+function updateRenderedPostMedia(post, indices) {
+  const tracks = [...app.querySelectorAll("[data-post-carousel-track]")]
+      .filter((track) => String(track.dataset.id) === String(post.id));
+  if (!tracks.length) return;
+  const count = Math.max(0, Array.isArray(post.mediaIds) ? post.mediaIds.length : 0);
+  for (const track of tracks) {
+    for (const index of indices) {
+      const slide = [...track.querySelectorAll(".post-carousel-slide")]
+          .find((node) => Number(node.dataset.slideIndex) === Number(index));
+      if (!slide) continue;
+      const item = post.mediaUrls?.[index];
+      if (item?.url) {
+        const mediaType = String(item.contentType || "");
+        const label = `Media ${index + 1} of ${count} shared by ${post.authorSnapshot?.displayName || "a community member"}`;
+        let media;
+        if (mediaType.startsWith("video/")) {
+          media = document.createElement("video");
+          media.controls = true;
+          media.playsInline = true;
+          media.preload = "none";
+          media.setAttribute("aria-label", label);
+        } else {
+          media = document.createElement("img");
+          media.alt = label;
+          media.loading = Number(track.dataset.currentIndex || track.dataset.startIndex || 0) === index ? "eager" : "lazy";
+          media.decoding = "async";
+          media.fetchPriority = index === 0 ? "high" : "auto";
+        }
+        media.src = item.url;
+        slide.replaceChildren(media);
+      } else if ((post.mediaLoadErrorIndices || []).includes(index)) {
+        slide.innerHTML = `<button class="carousel-lazy-placeholder is-error" type="button" data-action="load-post-media" data-id="${esc(post.id)}" data-index="${index}">Tap to retry media ${index + 1}</button>`;
+      } else if (post.mediaLoadingIndices?.includes(index)) {
+        slide.innerHTML = `<div class="carousel-lazy-placeholder" role="status">${icon("spinner",20)}<span>Loading media…</span></div>`;
+      }
+    }
+  }
+}
+
 async function hydratePostMedia(post, requestedIndices = [0]) {
   if (!post?.id || !Array.isArray(post.mediaIds) || post.mediaIds.length === 0) return;
   const count = post.mediaIds.length;
@@ -472,9 +556,11 @@ async function hydratePostMedia(post, requestedIndices = [0]) {
   post.mediaLoadingIndices = [...busy, ...missing];
   post.mediaLoading = true;
   post.mediaLoadErrorIndices = Array.isArray(post.mediaLoadErrorIndices) ? post.mediaLoadErrorIndices : [];
+  updateRenderedPostMedia(post, missing);
   try {
-    // Generate short-lived signed URLs only for the current slide and its neighbours.
-    // Image/video bytes for other slides are not requested until the user swipes to them.
+    // Only resolve signed URLs for visible/nearby slides. Updating the existing
+    // figure nodes prevents async URL completion from replacing the track and
+    // snapping a user's current slide back to index zero.
     const result = await readPostMedia(post.id, missing.map((index) => post.mediaIds[index]));
     const loaded = Array.isArray(result) ? result : [];
     for (const item of loaded) {
@@ -485,15 +571,15 @@ async function hydratePostMedia(post, requestedIndices = [0]) {
       }
     }
     for (const index of missing) {
-      if (!post.mediaUrls[index]) post.mediaLoadErrorIndices.push(index);
+      if (!post.mediaUrls[index] && !post.mediaLoadErrorIndices.includes(index)) post.mediaLoadErrorIndices.push(index);
     }
   } catch (error) {
     for (const index of missing) if (!post.mediaLoadErrorIndices.includes(index)) post.mediaLoadErrorIndices.push(index);
     console.debug("[Marvel Chat] post media read failed", error?.code || error?.message);
   } finally {
-    post.mediaLoadingIndices = post.mediaLoadingIndices.filter((index) => !missing.includes(index));
+    post.mediaLoadingIndices = (post.mediaLoadingIndices || []).filter((index) => !missing.includes(index));
     post.mediaLoading = post.mediaLoadingIndices.length > 0;
-    paint();
+    updateRenderedPostMedia(post, missing);
   }
 }
 
@@ -680,7 +766,8 @@ function categoryChips(kind, selected) {
 
 function momentCard(m, own = false) {
   const label = own ? "Your Moment" : (m.authorSnapshot?.displayName || m.author?.displayName || m.displayName || m.username || "Following");
-  return `<button class="moment-card ${own ? "own has-moment" : "has-moment"}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring"><div class="moment-avatar">${avatar(m.authorSnapshot || m.author || m,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
+  const person = own ? (state.profile || state.user || m) : (m.authorSnapshot || m.author || m);
+  return `<button class="moment-card ${own ? "own has-moment" : "has-moment"}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring"><div class="moment-avatar">${avatar(person,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
 }
 
 function renderPostCard(p) {
@@ -695,16 +782,16 @@ function renderPostCard(p) {
           const m = urls[index] || null;
           const loadFailed = Array.isArray(p.mediaLoadErrorIndices) && p.mediaLoadErrorIndices.includes(index);
           if (!m || !m.url) {
-            return `<figure class="post-carousel-slide" role="group" aria-label="${index + 1} of ${mediaCount}">${loadFailed
+            return `<figure class="post-carousel-slide" data-slide-index="${index}" data-media-id="${esc(p.mediaIds?.[index] || "")}" role="group" aria-label="${index + 1} of ${mediaCount}">${loadFailed
               ? `<button class="carousel-lazy-placeholder is-error" type="button" data-action="load-post-media" data-id="${esc(p.id)}" data-index="${index}">Tap to retry media ${index + 1}</button>`
               : `<div class="carousel-lazy-placeholder" role="status">${icon(p.mediaLoading ? "spinner" : "image",20)}<span>${index === mediaIndex ? "Loading media…" : "Swipe to view this item"}</span></div>`}</figure>`;
           }
           const mediaType = String(m.contentType || "");
           const label = `Media ${index + 1} of ${mediaCount} shared by ${author.displayName || "a community member"}`;
           if (mediaType.startsWith("video/")) {
-            return `<figure class="post-carousel-slide" role="group" aria-label="${index + 1} of ${mediaCount}"><video src="${esc(m.url)}" controls playsinline preload="none" aria-label="${esc(label)}"></video></figure>`;
+            return `<figure class="post-carousel-slide" data-slide-index="${index}" data-media-id="${esc(p.mediaIds?.[index] || "")}" role="group" aria-label="${index + 1} of ${mediaCount}"><video src="${esc(m.url)}" controls playsinline preload="none" aria-label="${esc(label)}"></video></figure>`;
           }
-          return `<figure class="post-carousel-slide" role="group" aria-label="${index + 1} of ${mediaCount}"><img src="${esc(m.url)}" alt="${esc(label)}" loading="${index === mediaIndex ? "eager" : "lazy"}" fetchpriority="${Number(p.feedIndex) === 0 && index === 0 ? "high" : "auto"}" decoding="async"></figure>`;
+          return `<figure class="post-carousel-slide" data-slide-index="${index}" data-media-id="${esc(p.mediaIds?.[index] || "")}" role="group" aria-label="${index + 1} of ${mediaCount}"><img src="${esc(m.url)}" alt="${esc(label)}" loading="${index === mediaIndex ? "eager" : "lazy"}" fetchpriority="${Number(p.feedIndex) === 0 && index === 0 ? "high" : "auto"}" decoding="async"></figure>`;
         }).join("")}
       </div>
     </div>
@@ -723,28 +810,32 @@ function renderPostCard(p) {
 
 function renderDiscoveryBanner() {
   if (!shouldShowDiscoveryBanner()) return "";
-  return `<section class="discovery-banner" aria-label="Discover more on Marvel Chat">
-    <div class="discovery-banner-glimmer discovery-glimmer-one" aria-hidden="true"></div>
-    <div class="discovery-banner-glimmer discovery-glimmer-two" aria-hidden="true"></div>
-    <button class="discovery-banner-dismiss" type="button" data-action="dismiss-discovery-banner" aria-label="Dismiss discovery banner">${icon("close",16)}</button>
-    <div class="discovery-banner-intro">
-      <span class="discovery-banner-kicker">A LITTLE MORE TO EXPLORE</span>
-      <h2>Find your next favourite thing.</h2>
-      <p>Shop useful finds and discover people with skills worth knowing.</p>
-    </div>
-    <div class="discovery-banner-options">
-      <button class="discovery-option discovery-option-market" type="button" data-action="route-market">
-        <span class="discovery-option-art discovery-market-art" aria-hidden="true"><span class="discovery-art-orbit"></span><span class="discovery-art-icon">${icon("market",25)}</span><span class="discovery-art-spark">✦</span></span>
-        <span class="discovery-option-copy"><strong>Explore Marvel Market</strong><small>Discover products and shops</small></span>
-        <span class="discovery-option-arrow">${icon("arrow",16)}</span>
-      </button>
-      <button class="discovery-option discovery-option-skills" type="button" data-action="route-skills">
-        <span class="discovery-option-art discovery-skills-art" aria-hidden="true"><span class="discovery-art-orbit"></span><span class="discovery-art-icon">${icon("skills",25)}</span><span class="discovery-art-spark">✦</span></span>
-        <span class="discovery-option-copy"><strong>Explore Marvel Skills</strong><small>Meet talented providers</small></span>
-        <span class="discovery-option-arrow">${icon("arrow",16)}</span>
-      </button>
-    </div>
-  </section>`;
+  return `<div class="discovery-overlay" data-discovery-overlay role="dialog" aria-modal="true" aria-labelledby="discovery-title">
+    <section class="discovery-banner" aria-label="Discover more on Marvel Chat">
+      <div class="discovery-banner-glimmer discovery-glimmer-one" aria-hidden="true"></div>
+      <div class="discovery-banner-glimmer discovery-glimmer-two" aria-hidden="true"></div>
+      <button class="discovery-banner-dismiss" type="button" data-action="dismiss-discovery-banner" aria-label="Dismiss discovery banner">${icon("close",18)}</button>
+      <div class="discovery-banner-brand"><img src="./assets/brand/icon-192.png" width="48" height="48" alt="Marvel Chat"><span>MARVEL CHAT DISCOVERY</span></div>
+      <div class="discovery-banner-intro">
+        <span class="discovery-banner-kicker">A LITTLE MORE TO EXPLORE</span>
+        <h2 id="discovery-title">Find your next favourite thing.</h2>
+        <p>Discover useful products, independent shops and people with skills worth knowing.</p>
+      </div>
+      <div class="discovery-banner-options">
+        <button class="discovery-option discovery-option-market" type="button" data-action="route-market">
+          <span class="discovery-option-art discovery-market-art" aria-hidden="true"><span class="discovery-art-orbit"></span><span class="discovery-art-icon">${icon("market",25)}</span><span class="discovery-art-spark">✦</span></span>
+          <span class="discovery-option-copy"><strong>Explore Marvel Market</strong><small>Discover products and shops</small></span>
+          <span class="discovery-option-arrow">${icon("arrow",16)}</span>
+        </button>
+        <button class="discovery-option discovery-option-skills" type="button" data-action="route-skills">
+          <span class="discovery-option-art discovery-skills-art" aria-hidden="true"><span class="discovery-art-orbit"></span><span class="discovery-art-icon">${icon("skills",25)}</span><span class="discovery-art-spark">✦</span></span>
+          <span class="discovery-option-copy"><strong>Explore Marvel Skills</strong><small>Meet talented providers</small></span>
+          <span class="discovery-option-arrow">${icon("arrow",16)}</span>
+        </button>
+      </div>
+      <p class="discovery-banner-footnote">This invitation closes automatically in 30 seconds.</p>
+    </section>
+  </div>`;
 }
 
 function renderHome() {
@@ -764,7 +855,7 @@ function renderHome() {
       : state.homeLoaded && state.posts.length ? `<p class="end-of-feed">You’re all caught up.</p>` : "";
   return `<section class="screen home-screen">
     ${renderDiscoveryBanner()}
-    <section class="home-moments"><div class="section-head compact"><div><span class="eyebrow">MOMENTS</span><h2>Stories & updates</h2></div><button class="text-button" type="button" data-action="create-moment">Create</button></div><div class="moments-row">${own ? momentCard(own,true) : `<button class="moment-card own" type="button" data-action="create-moment"><div class="moment-ring add-ring"><div class="moment-avatar">${avatar(state.profile || state.user,"md",true)}</div><span class="add-badge">${icon("plus",13)}</span></div><span class="moment-label">Add a Moment</span></button>`}${following.map((m) => momentCard(m)).join("")}</div></section>
+    <section class="home-moments"><div class="section-head compact"><div><span class="eyebrow">MOMENTS</span><h2>Stories & updates</h2></div><button class="text-button" type="button" data-action="create-moment">Create</button></div><div class="moments-row">${own ? momentCard(own,true) : `<button class="moment-card own no-moment" type="button" data-action="create-moment"><div class="moment-ring add-ring"><div class="moment-avatar">${avatar(state.profile || state.user,"md",true)}</div><span class="add-badge">${icon("plus",13)}</span></div><span class="moment-label">Add a Moment</span></button>`}${following.map((m) => momentCard(m)).join("")}</div></section>
     ${contextualSearch("home-search-form","Search people and posts…","people_posts",state.searchQuery)}
     ${state.homeSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">SEARCH</span><h2>Matches</h2></div><button class="text-button" type="button" data-action="clear-home-search">Clear</button></div><div class="results">${state.homeSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}
     <section class="section feed-section"><div class="section-head compact"><div><span class="eyebrow">COMMUNITY FEED</span><h2>Latest updates</h2></div></div>${feedBody}${paging}</section>
@@ -855,9 +946,9 @@ function renderSkillOnboarding() {
 
 function renderProfile() {
   const p = state.profile || {};
-  const posts = p.postsCount ?? p.postCount ?? 0;
-  const followers = state.followStats.followersCount || p.followersCount || 0;
-  const following = state.followStats.followingCount || state.followingIds.length || p.followingCount || 0;
+  const posts = state.followStats.postCount ?? p.postsCount ?? p.postCount ?? 0;
+  const followers = state.followStats.followersCount ?? p.followersCount ?? 0;
+  const following = state.followStats.followingCount ?? p.followingCount ?? state.followingIds.length ?? 0;
   return `<section class="screen">${head("YOUR SPACE","Profile","Your identity, provider account, seller account, and settings.","edit-profile","Edit profile")}<div class="profile-hero">${avatar(p,"xl",true)}<div class="profile-main"><h1>${esc(p.displayName || state.user?.displayName || "Your profile")}</h1><p class="handle">${esc(p.username ? `@${p.username}` : p.email || state.user?.email || "")}</p><p class="bio">${esc(p.bio || "")}</p></div></div><div class="profile-stats"><div><strong>${esc(posts)}</strong><span>Posts</span></div><div><strong>${esc(followers)}</strong><span>Followers</span></div><div><strong>${esc(following)}</strong><span>Following</span></div></div><div class="profile-grid"><button class="profile-tile" type="button" data-action="route-skill-profile"><span class="tile-icon">${icon("skills",20)}</span><strong>${state.skillProfile ? "My Skills" : "Create skill account"}</strong><small>${state.skillProfile ? "Manage your provider profile and services." : "Become a provider from your Profile."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-business"><span class="tile-icon">${icon("shop",20)}</span><strong>${state.myStore ? "My Shop" : "Create seller account"}</strong><small>${state.myStore ? "Manage your storefront, products, stock, and orders." : "Create a seller account before opening your shop."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-settings"><span class="tile-icon">${icon("settings",20)}</span><strong>Settings</strong><small>Appearance and notification preferences.</small>${icon("arrow",17)}</button></div><div class="profile-footer-actions"><button class="btn btn-secondary" type="button" data-action="sign-out">${icon("logout",17)}Sign out</button></div></section>`;
 }
 
@@ -951,6 +1042,8 @@ async function legalBody(type) {
     });
   });
   main.querySelector("header")?.remove();
+  main.querySelector(".legal-page-hero")?.remove();
+  main.querySelector(".legal-policy-nav")?.remove();
   main.querySelectorAll('a[data-return-marvel], a[href="./"], a[href="/"]').forEach((link) => {
     const button = parsed.createElement("button");
     button.type = "button";
@@ -968,7 +1061,9 @@ async function legalBody(type) {
     privacy: "How Davonium Technologies handles information used to operate Marvel Chat.",
     community: "The standards that help keep Marvel Chat useful, respectful and trustworthy."
   }[type];
-  const hero = `<section class="legal-modal-hero"><div class="legal-modal-mark"><img src="./assets/brand/icon-192.png" width="56" height="56" alt="Marvel Chat"></div><div class="legal-modal-hero-copy"><span class="eyebrow">OFFICIAL POLICY · DAVONIUM TECHNOLOGIES</span><h3>${esc({terms:"Terms of Use",privacy:"Privacy Policy",community:"Community Guidelines"}[type])}</h3><p>${esc(summary)}</p></div></section>`;
+  const legalLinks = [["terms","Terms of Use"],["privacy","Privacy Policy"],["community","Community Guidelines"]];
+  const switcher = `<nav class="legal-modal-switcher" aria-label="Switch legal page">${legalLinks.map(([key,label]) => `<button type="button" class="${key === type ? "active" : ""}" data-action="legal-${key}" ${key === type ? 'aria-current="page"' : ""}>${label}</button>`).join("")}</nav>`;
+  const hero = `<section class="legal-modal-hero"><div class="legal-modal-mark"><img src="./assets/brand/icon-192.png" width="56" height="56" alt="Marvel Chat"></div><div class="legal-modal-hero-copy"><span class="eyebrow">OFFICIAL POLICY · DAVONIUM TECHNOLOGIES</span><h3>${esc({terms:"Terms of Use",privacy:"Privacy Policy",community:"Community Guidelines"}[type])}</h3><p>${esc(summary)}</p></div>${switcher}</section>`;
   return `${hero}<div class="legal-modal-document">${main.innerHTML}</div>`;
 }
 
@@ -1046,6 +1141,7 @@ function bindCatalogueMedia() {
 
 function paint() {
   if (!state.user) {
+    stopDiscoveryBannerTimer();
     homePaginationObserver?.disconnect();
     homePaginationObserver = null;
     app.innerHTML = authScreen();
@@ -1074,6 +1170,7 @@ function paint() {
       track.scrollLeft = Math.max(0, ratio * track.clientWidth);
     });
   });
+  syncDiscoveryBannerTimer();
 }
 
 async function refreshRouteData(route) {
@@ -1299,7 +1396,7 @@ document.addEventListener("click", async (e) => {
   const a = actionEl.dataset.action;
   try {
     if (a === "close-modal") { clearTimeout(momentAutoCloseTimer); closeModal(); return; }
-    if (a === "dismiss-discovery-banner") { discoveryBannerVisibleForUser = false; paint(); return; }
+    if (a === "dismiss-discovery-banner") { stopDiscoveryBannerTimer(); discoveryBannerVisibleForUser = false; paint(); return; }
     if (a === "auth-welcome") { authMode="welcome"; paint(); return; }
     if (a === "auth-signin") { authMode="signin"; paint(); return; }
     if (a === "auth-signup") { authMode="signup"; paint(); return; }
@@ -1322,7 +1419,7 @@ document.addEventListener("click", async (e) => {
       }
       return;
     }
-    if (a.startsWith("route-")) { document.getElementById("menu-root")?.remove(); go(a.slice(6)); return; }
+    if (a.startsWith("route-")) { if (app.querySelector("[data-discovery-overlay]")) { stopDiscoveryBannerTimer(); discoveryBannerVisibleForUser = false; } document.getElementById("menu-root")?.remove(); go(a.slice(6)); return; }
     if (a === "open-menu") {
       if (document.getElementById("menu-root")) return;
       const root = document.createElement("div");
@@ -1666,9 +1763,9 @@ document.addEventListener("change", async (e) => {
       }
       const totalBytes = preparedItems.reduce((sum, item) => sum + item.optimized.size, 0);
       if (totalBytes > DAILY_MEDIA_BYTES) throw new Error(`The selected files total ${formatMiB(totalBytes)} after compression. The daily upload limit is 2.00 MiB.`);
-      const usage = await api.getMyMediaDailyUsage({});
+      const usage = await api.getMyMediaDailyUsage({requestedBytes: totalBytes});
       const remainingBytes = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
-      if (totalBytes > remainingBytes) throw new Error(`You have reached your daily media limit. ${formatMiB(remainingBytes)} remaining; this selection needs ${formatMiB(totalBytes)}. The daily limit is 2.00 MiB.`);
+      if (totalBytes > remainingBytes) throw new Error(`The shared rolling 24-hour media limit is 2.00 MiB. ${formatMiB(remainingBytes)} remains and this selection needs ${formatMiB(totalBytes)}. ${quotaRetryCopy(usage?.retryAt)} Text-only posts are still available.`);
       state[filesStateKey] = preparedItems.map((item) => item.optimized);
       if (box) {
         box.innerHTML = preparedItems.map(({original, optimized}) => {
@@ -1726,10 +1823,10 @@ document.addEventListener("change", async (e) => {
       if (optimized.size > MAX_MEDIA_BYTES) {
         throw new Error("This media is still larger than 2 MiB after compression. Choose a smaller photo or video.");
       }
-      const usage = await api.getMyMediaDailyUsage({});
+      const usage = await api.getMyMediaDailyUsage({requestedBytes: optimized.size});
       const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
       if (optimized.size > remaining) {
-        throw new Error(`You have reached your daily media limit. ${formatMiB(remaining)} remaining; this item needs ${formatMiB(optimized.size)}. The daily limit is 2.00 MiB.`);
+        throw new Error(`The shared rolling 24-hour media limit is 2.00 MiB. ${formatMiB(remaining)} remains and this item needs ${formatMiB(optimized.size)}. ${quotaRetryCopy(usage?.retryAt)} Text-only Moments are still available.`);
       }
       state.pendingMomentFile = optimized;
       const contentSelect=document.getElementById("moment-content-type");
@@ -1770,6 +1867,7 @@ document.addEventListener("submit", async (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && app.querySelector("[data-discovery-overlay]")) { stopDiscoveryBannerTimer(); discoveryBannerVisibleForUser = false; paint(); return; }
   if (e.key === "Escape") { document.getElementById("menu-root")?.remove(); closeModal(); }
   if(e.key === "/" && !["INPUT","TEXTAREA","SELECT"].includes(e.target.tagName)){e.preventDefault();go("search");setTimeout(()=>document.querySelector('#search-form input[name="query"]')?.focus(),0);}
   if(e.target.matches(".composer textarea") && e.key === "Enter" && !e.shiftKey){e.preventDefault();e.target.form?.requestSubmit();}
@@ -1782,7 +1880,7 @@ onAuthStateChanged(auth, async (user) => {
   clearSubscriptions();
   const previousUid = state.user?.uid || "";
   state.user = user;
-  if (previousUid !== (user?.uid || "")) discoveryBannerVisibleForUser = null;
+  if (previousUid !== (user?.uid || "")) { stopDiscoveryBannerTimer(); discoveryBannerVisibleForUser = null; }
   state.activeThreadId = null;
   state.messages = [];
   if (!user) {
@@ -1795,7 +1893,7 @@ onAuthStateChanged(auth, async (user) => {
   if (previousUid !== user.uid) {
     state.posts = []; state.moments = []; state.homeCursor = null; state.homeHasMore = false; state.homeViewerFollowsAny = null; state.homeLoaded = false; state.homeError = "";
     state.savedPosts = []; state.savedPostsCursor = null; state.savedPostsHasMore = false; state.savedPostsLoaded = false;
-    state.notifications = []; state.unreadNotifications = 0; state.followingIds = []; state.followStats = {followersCount: 0, followingCount: 0};
+    state.notifications = []; state.unreadNotifications = 0; state.followingIds = []; state.followStats = {followersCount: 0, followingCount: 0, postCount: 0};
   }
   try { state.pushEnabled = typeof Notification !== "undefined" && Notification.permission === "granted"; } catch {}
   // Render immediately after authentication. Profile and notification requests

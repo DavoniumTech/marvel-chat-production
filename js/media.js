@@ -13,6 +13,26 @@ function formatKB(bytes) {
   return `${(Math.max(0, Number(bytes) || 0) / 1024).toFixed(1)} KB`;
 }
 
+function quotaWaitText(retryAt) {
+  const when = retryAt ? new Date(retryAt) : null;
+  if (!when || !Number.isFinite(when.getTime())) return "Try again after some recent media use expires.";
+  const ms = Math.max(0, when.getTime() - Date.now());
+  const totalMinutes = Math.ceil(ms / 60000);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const remaining = hours ? `${hours} h ${minutes} min` : `${minutes} min`;
+  return `You can upload again in about ${remaining} (around ${when.toLocaleTimeString([], {hour:"2-digit", minute:"2-digit"})}).`;
+}
+
+function quotaExceededMessage(remainingBytes, neededBytes, retryAt) {
+  const remaining = Math.max(0, Number(remainingBytes) || 0);
+  const needed = Math.max(0, Number(neededBytes) || 0);
+  if (needed > DAILY_MEDIA_BYTES) {
+    return `This selection is ${formatMiB(needed)} after compression. The complete daily media allowance is 2.00 MiB; select fewer or smaller items. Text-only posts are still available.`;
+  }
+  return `You have reached the shared 2.00 MiB media allowance for the rolling last 24 hours. ${formatKB(remaining)} remains, but this upload needs ${formatKB(needed)}. ${quotaWaitText(retryAt)} Text-only posts are still available.`;
+}
+
 export const ALLOWED_HOME_MEDIA_TYPES = new Set([
   "image/jpeg",
   "image/png",
@@ -267,18 +287,26 @@ async function upload(file, feature, allowedTypes) {
     throw new Error("This media is still larger than the 2 MiB per-file limit after compression. Choose a smaller file.");
   }
 
-  const usage = await api.getMyMediaDailyUsage({});
+  const usage = await api.getMyMediaDailyUsage({requestedBytes: optimized.size});
   const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
   if (optimized.size > remaining) {
-    throw new Error(`You have reached your daily media limit. ${formatKB(remaining)} remaining; this item needs ${formatKB(optimized.size)}. The shared daily limit is 2 MiB.`);
+    throw new Error(quotaExceededMessage(remaining, optimized.size, usage?.retryAt));
   }
 
-  const ticket = await api.createMediaUpload({
-    feature,
-    mimeType: optimized.type,
-    sizeBytes: optimized.size,
-    originalName: optimized.name
-  });
+  let ticket;
+  try {
+    ticket = await api.createMediaUpload({
+      feature,
+      mimeType: optimized.type,
+      sizeBytes: optimized.size,
+      originalName: optimized.name
+    });
+  } catch (error) {
+    if (error?.details?.retryAt || String(error?.code || "").includes("resource-exhausted")) {
+      throw new Error(quotaExceededMessage(error?.details?.remainingBytes, optimized.size, error?.details?.retryAt));
+    }
+    throw error;
+  }
 
   const put = await fetch(ticket.uploadUrl, {
     method: "PUT",
@@ -327,20 +355,28 @@ export async function uploadHomeMediaFiles(files) {
     throw new Error("The optimized selection exceeds the 2 MiB daily media limit.");
   }
 
-  const usage = await api.getMyMediaDailyUsage({});
+  const usage = await api.getMyMediaDailyUsage({requestedBytes: totalBytes});
   const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
   if (totalBytes > remaining) {
-    throw new Error(`You have reached your daily media limit. ${formatKB(remaining)} remaining; this selection needs ${formatKB(totalBytes)}. The shared daily limit is 2 MiB.`);
+    throw new Error(quotaExceededMessage(remaining, totalBytes, usage?.retryAt));
   }
 
   const ids = [];
   for (const optimized of prepared) {
-    const ticket = await api.createMediaUpload({
-      feature: "home_post",
-      mimeType: optimized.type,
-      sizeBytes: optimized.size,
-      originalName: optimized.name
-    });
+    let ticket;
+    try {
+      ticket = await api.createMediaUpload({
+        feature: "home_post",
+        mimeType: optimized.type,
+        sizeBytes: optimized.size,
+        originalName: optimized.name
+      });
+    } catch (error) {
+      if (error?.details?.retryAt || String(error?.code || "").includes("resource-exhausted")) {
+        throw new Error(quotaExceededMessage(error?.details?.remainingBytes, optimized.size, error?.details?.retryAt));
+      }
+      throw error;
+    }
     const put = await fetch(ticket.uploadUrl, {
       method: "PUT",
       headers: ticket.requiredHeaders || {"Content-Type": optimized.type},

@@ -1,4 +1,4 @@
-const CACHE = "marvel-chat-shell-20261013-7";
+const CACHE = "marvel-chat-shell-20261013-8";
 const SHELL = [
   "./",
   "./index.html",
@@ -9,6 +9,7 @@ const SHELL = [
   "./js/config.js",
   "./js/firebase.js",
   "./js/icons.js",
+  "./js/legal-page.js",
   "./js/media.js",
   "./js/state.js",
   "./js/ui.js",
