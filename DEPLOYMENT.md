@@ -1,24 +1,49 @@
-# Marvel Chat Frontend Release — 13 October 2026
+# Marvel Chat Production — 15 October 2026 frontend integration
 
-Static vanilla HTML/CSS/JavaScript. No frontend npm build is needed. Includes the existing app modules, PWA manifest/service worker, `CNAME`, optimized icons/logo, legal pages and validators.
+## Production source
 
-## Windows CMD install
+The current `marvel-chat-production` repository and UI remain the source of truth. This release adds only front-end corporate navigation/PWA reliability changes and search-scope tightening. It does not change callable names or server contracts.
 
-Download `MARVEL-CHAT-FRONTEND-RELEASE-20261013.zip` into Downloads, then:
+## Windows CMD publisher
+
+1. Extract the frontend ZIP to a new folder under Downloads.
+2. Synchronize the existing production checkout if it is behind:
 
 ```bat
-cd /d "%USERPROFILE%\Downloads"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$zip = Join-Path $env:USERPROFILE 'Downloads\MARVEL-CHAT-FRONTEND-RELEASE-20261013.zip'; $dest = Join-Path $env:USERPROFILE 'Downloads\Marvel-Chat-Frontend-Release-20261013'; if (Test-Path $dest) { throw 'Destination already exists. Rename it or choose another destination.' }; Expand-Archive -LiteralPath $zip -DestinationPath $dest"
-cd /d "%USERPROFILE%\Downloads\Marvel-Chat-Frontend-Release-20261013"
-PUBLISH-MARVEL-CHAT-FRONTEND.cmd
+git -C "%USERPROFILE%\Downloads\marvel-chat-production" pull --ff-only origin main
+git -C "%USERPROFILE%\Downloads\marvel-chat-production" status -sb
 ```
 
-The publisher uses `https://github.com/DavoniumTech/marvel-chat-production.git` and the known staging clone in Downloads. It fetches `main` over HTTP/1.1, creates branch `marvel-chat-release-20261013`, copies release files without mirroring/deleting unrelated files, shows staged diff, asks you to type `PUSH`, and pushes only that review branch. If the staging clone has uncommitted changes or points to a different repository, it stops safely. Do not force-push.
+3. Run the included publisher with the known checkout:
 
-## Cloudflare publication
+```bat
+cd /d "%USERPROFILE%\Downloads\Marvel-Chat-Production-Integration-20261015"
+PUBLISH-MARVEL-CHAT-FRONTEND.cmd "%USERPROFILE%\Downloads\marvel-chat-production"
+```
 
-Review the PR and merge to `main` only after review and smoke tests. A branch push alone does not update production. Verify Cloudflare Workers Builds remains connected to this GitHub repository with `main` as production branch, and confirm a new deployment reaches Ready before assuming it is live.
+It validates the repository URL, `main` / `origin/main`, cleanliness and branch synchronization. It requires the explicit confirmations `CONFIRM-PRODUCTION-BRANCH` and `PUBLISH-MARVEL-CHAT`. It does not force-push or mirror-delete destination files.
 
-## Validation and known gaps
+## Backend status
 
-`bash scripts/validate.sh` and Node `--check` for all `js/*.js` pass. Live Firebase/Auth/R2/FCM tests remain required. Home currently pages public posts only; follower-only feed merging is not complete. Moment viewer remains modal-based (not a full-screen story player with a 15-second timer). Comment ranking by likes is not implemented. Legal pages have placeholders for support email/legal contact and require company review. Skill/Market/Profile media and global quota/R2 cleanup require live smoke tests.
+This integration does not introduce backend API or data-schema changes. The supplied deployed-backend snapshot is a mapping of source bundles used by currently active second-generation Functions; do not unzip all historical bundles into one Firebase `functions` root and deploy them wholesale, because that could downgrade functions which were deployed from different source revisions. Verify the live inventory in Cloud Shell instead:
+
+```bash
+gcloud config set project project-ec531e09-e3fd-4408-a35
+gcloud functions list --v2 --regions=europe-west1 --project=project-ec531e09-e3fd-4408-a35 --format="table(name,state,updateTime)"
+```
+
+A backend deployment is not required for the company links, search UI, install prompt, offline shell banner, service-worker cache namespace, or same-origin notification click handling. The existing FCM endpoints remain in use.
+
+## Cloudflare
+
+After a successful Git push, wait for the new Build deployment under Workers & Pages → `marvel-chat-production` → Deployments to show Ready. A Git push alone does not prove production has updated.
+
+## Live test checklist
+
+- Email and Google sign-in, session persistence and sign-out.
+- Global Search: People and posts / People only; no Skills or Market option.
+- Open Terms, Privacy and Community Guidelines; external company/contact links open in a new tab.
+- Settings → Install and Check for updates (browser/device support varies).
+- Go offline and online: message explains that live data/uploads require connectivity; cached shell and legal pages can load.
+- Enable browser notifications and verify device registration plus an actual push on supported devices.
+- Check light and dark theme, phone portrait/landscape, tablets, and laptop/desktop bottom navigation.

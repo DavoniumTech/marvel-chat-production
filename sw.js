@@ -1,8 +1,12 @@
-const CACHE = "marvel-chat-shell-20261013-8";
+const CACHE = "marvel-chat-shell-20261015-1";
 const SHELL = [
   "./",
   "./index.html",
   "./manifest.json",
+  "./terms.html",
+  "./privacy.html",
+  "./community-guidelines.html",
+  "./community.html",
   "./css/styles.css",
   "./js/app.js",
   "./js/api.js",
@@ -14,7 +18,8 @@ const SHELL = [
   "./js/state.js",
   "./js/ui.js",
   "./assets/brand/icon-192.png",
-  "./assets/brand/icon-512.png"
+  "./assets/brand/icon-512.png",
+  "./assets/brand/davonium-technologies-logo.png"
 ];
 
 self.addEventListener("install", (event) => {
@@ -29,7 +34,7 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches.keys()
       .then((keys) => Promise.all(
-        keys.filter((key) => key !== CACHE).map((key) => caches.delete(key))
+        keys.filter((key) => key.startsWith("marvel-chat-shell-") && key !== CACHE).map((key) => caches.delete(key))
       ))
       .then(() => self.clients.claim())
   );
@@ -52,7 +57,7 @@ self.addEventListener("fetch", (event) => {
         const copy = response.clone();
         caches.open(CACHE).then((cache) => cache.put(request, copy));
         return response;
-      }).catch(() => caches.match("./index.html"))
+      }).catch(async () => (await caches.match(request)) || caches.match("./index.html"))
     );
     return;
   }
@@ -110,12 +115,21 @@ self.addEventListener("notificationclick", (event) => {
   const target = event.notification?.data?.url || "./";
   event.waitUntil(
     clients.matchAll({type: "window", includeUncontrolled: true}).then((clientList) => {
-      const existing = clientList.find((client) => "focus" in client);
+      let safeTarget = new URL("./", self.location.href);
+      try {
+        const candidate = new URL(target, self.location.href);
+        if (candidate.origin === self.location.origin) safeTarget = candidate;
+      } catch (_) {}
+      const existing = clientList.find((client) => {
+        if (!("focus" in client)) return false;
+        try { return new URL(client.url).origin === self.location.origin; }
+        catch (_) { return false; }
+      });
       if (existing) {
-        existing.navigate(target);
+        existing.navigate(safeTarget.href);
         return existing.focus();
       }
-      return clients.openWindow(target);
+      return clients.openWindow(safeTarget.href);
     })
   );
 });

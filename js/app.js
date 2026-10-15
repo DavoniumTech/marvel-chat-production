@@ -226,6 +226,8 @@ function sideMenu() {
       <button class="menu-item" type="button" data-action="legal-terms">${icon("file")}Terms</button>
       <button class="menu-item" type="button" data-action="legal-privacy">${icon("lock")}Privacy</button>
       <button class="menu-item" type="button" data-action="legal-community">${icon("shield")}Community Guidelines</button>
+      <a class="menu-item menu-external" href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">${icon("grid")}Davonium Technologies website ↗</a>
+      <a class="menu-item menu-external" href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">${icon("chat")}Contact the company ↗</a>
       <div class="menu-foot">Davonium Technologies · © 2026</div>
       <button class="menu-item menu-sign-out" type="button" data-action="sign-out">${icon("logout")}Sign out</button>
     </aside>
@@ -953,12 +955,13 @@ function renderProfile() {
 }
 
 function renderSearch() {
-  const results = state.searchResults.slice(0,24);
-  return `<section class="screen">${head("DISCOVERY","Search","Find people, skills, products, and shops.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search everything…" autocomplete="off"></label><select name="scope"><option value="all" ${state.searchScope === "all" ? "selected" : ""}>Everything</option><option value="users" ${state.searchScope === "users" ? "selected" : ""}>People</option><option value="skills" ${state.searchScope === "skills" ? "selected" : ""}>Skills</option><option value="market" ${state.searchScope === "market" ? "selected" : ""}>Market</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching","Search by name, username, skill, product, or shop.")}</div></section>`;
+  const results = state.searchResults.slice(0, 24);
+  const scope = ["people_posts", "users"].includes(state.searchScope) ? state.searchScope : "people_posts";
+  return `<section class="screen">${head("DISCOVERY", "Search", "Find people and public posts.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search people and posts…" autocomplete="off"></label><select name="scope"><option value="people_posts" ${scope === "people_posts" ? "selected" : ""}>People and posts</option><option value="users" ${scope === "users" ? "selected" : ""}>People only</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching", "Search by name, username, or words from a public post.")}</div></section>`;
 }
 function renderNotifications() { return `<section class="screen">${head("UPDATES","Notifications",state.unreadNotifications ? `${state.unreadNotifications} unread` : "You are all caught up.", "", "", "home")}<div>${state.notifications.length ? state.notifications.map((n) => `<article class="notification ${n.read || n.isRead || n.readAt ? "" : "unread"}"><div class="notification-icon">${icon("bell",18)}</div><div class="grow"><strong>${esc(n.title || "Marvel Chat")}</strong><p>${esc(n.body || "")}</p><small>${when(n.createdAt)}</small></div>${!(n.read || n.isRead || n.readAt) ? `<button class="text-button" type="button" data-action="read-notification" data-id="${esc(n.id)}">Mark read</button>` : ""}</article>`).join("") : emptyState("No new notifications","Activity updates will appear here.")}</div></section>`; }
 function renderSettings() {
-  return `<section class="screen">${head("PREFERENCES","Settings","Choose how Marvel Chat looks and behaves.", "", "", "profile")}<div class="settings-list"><article class="setting-card"><div class="setting-copy"><strong>Appearance</strong><small>Choose the theme used across the application.</small></div><div class="theme-pills">${["light","dark","system"].map((x) => `<button class="${state.theme === x ? "active" : ""}" type="button" data-action="theme-${x}">${icon(x === "light" ? "sun" : x === "dark" ? "moon" : "system",16)}${x[0].toUpperCase()+x.slice(1)}</button>`).join("")}</div></article><article class="setting-card"><div class="setting-copy"><strong>Notifications</strong><small>Receive Marvel Chat updates on this browser when permission is enabled.</small></div>${state.pushEnabled ? `<button class="btn btn-secondary" type="button" data-action="disable-notifications">Disable</button>` : `<button class="btn btn-primary" type="button" data-action="enable-notifications">Enable</button>`}</article><button class="setting-card setting-link" type="button" data-action="legal-terms"><div class="setting-copy"><strong>Terms</strong><small>Review our service terms.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-privacy"><div class="setting-copy"><strong>Privacy</strong><small>Learn how account and activity data are handled.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-community"><div class="setting-copy"><strong>Community Guidelines</strong><small>Our standards for a useful and trustworthy community.</small></div>${icon("arrow",18)}</button></div></section>`;
+  return `<section class="screen">${head("PREFERENCES", "Settings", "Choose how Marvel Chat looks and behaves.", "", "", "profile")}<div class="settings-list"><article class="setting-card"><div class="setting-copy"><strong>Appearance</strong><small>Choose the theme used across the application.</small></div><div class="theme-pills">${["light", "dark", "system"].map((x) => `<button class="${state.theme === x ? "active" : ""}" type="button" data-action="theme-${x}">${icon(x === "light" ? "sun" : x === "dark" ? "moon" : "system", 16)}${x[0].toUpperCase() + x.slice(1)}</button>`).join("")}</div></article><article class="setting-card"><div class="setting-copy"><strong>Notifications</strong><small>Receive Marvel Chat updates on this browser when permission is enabled.</small></div>${state.pushEnabled ? `<button class="btn btn-secondary" type="button" data-action="disable-notifications">Disable</button>` : `<button class="btn btn-primary" type="button" data-action="enable-notifications">Enable</button>`}</article><article class="setting-card"><div class="setting-copy"><strong>Install Marvel Chat</strong><small>Add Marvel Chat to your home screen for an app-like experience. Installation depends on your browser and device.</small></div><button class="btn btn-secondary" type="button" data-action="install-app">Install</button></article><article class="setting-card"><div class="setting-copy"><strong>App updates</strong><small>Check for the latest app shell while online.</small></div><button class="btn btn-secondary" type="button" data-action="check-app-update">Check</button></article><button class="setting-card setting-link" type="button" data-action="legal-terms"><div class="setting-copy"><strong>Terms</strong><small>Review our service terms.</small></div>${icon("arrow", 18)}</button><button class="setting-card setting-link" type="button" data-action="legal-privacy"><div class="setting-copy"><strong>Privacy</strong><small>Learn how account and activity data are handled.</small></div>${icon("arrow", 18)}</button><button class="setting-card setting-link" type="button" data-action="legal-community"><div class="setting-copy"><strong>Community Guidelines</strong><small>Our standards for a useful and trustworthy community.</small></div>${icon("arrow", 18)}</button><div class="company-links"><a href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">Davonium Technologies ↗</a><a href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">Contact support ↗</a></div></div></section>`;
 }
 
 function getBrowserDeviceIds() {
@@ -1437,6 +1440,9 @@ document.addEventListener("click", async (e) => {
     if (a.startsWith("legal-")) { document.getElementById("menu-root")?.remove(); openLegal(a.slice(6)); return; }
     if (a === "feedback") { document.getElementById("menu-root")?.remove(); openFeedback(); return; }
     if (a === "sign-out") { document.getElementById("menu-root")?.remove(); await signOut(auth); return; }
+    if (a === "install-app") { await promptAppInstall(); return; }
+    if (a === "check-app-update") { await checkForAppUpdate(); return; }
+    if (a === "refresh-app") { window.location.reload(); return; }
     if (a === "create-menu") { openCreateMenu(); return; }
     if (a === "pick-post-media") { document.getElementById("post-media")?.click(); return; }
     if (a === "pick-moment-media") { document.getElementById("moment-photo")?.click(); return; }
@@ -1861,7 +1867,7 @@ document.addEventListener("submit", async (e) => {
     if(f.id === "home-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();if(state.searchQuery.length<2){state.homeSearchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:"people_posts"});state.homeSearchResults=Array.isArray(r?.results)?r.results.filter((item)=>["user","person","post"].includes(String(item?.type||"").toLowerCase())):[];paint();return;}
     if(f.id === "chat-person-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.chatSearchQuery=String(d.query || "").trim();if(state.chatSearchQuery.length<2){state.chatSearchResults=[];paint();return;}const r=await api.search({query:state.chatSearchQuery,scope:"users"});state.chatSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "skills-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.skillsSearchQuery=String(d.query || "").trim();paint();return;}
-    if(f.id === "search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.searchScope=String(d.scope || "all");if(state.searchQuery.length<2){state.searchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:state.searchScope});state.searchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
+    if(f.id === "search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.searchScope=String(d.scope || "people_posts");if(state.searchQuery.length<2){state.searchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:state.searchScope});state.searchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "market-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();await loadMarket();paint();return;}
   } catch(err) { e.preventDefault(); console.error(err?.code,err?.message); toast(friendlyError(err),"error"); }
 });
@@ -1873,7 +1879,85 @@ document.addEventListener("keydown", (e) => {
   if(e.target.matches(".composer textarea") && e.key === "Enter" && !e.shiftKey){e.preventDefault();e.target.form?.requestSubmit();}
 });
 
-if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
+let deferredInstallPrompt = null;
+
+function syncConnectionStatus() {
+  const status = document.getElementById("connection-status");
+  if (status) status.hidden = Boolean(navigator.onLine);
+}
+
+function showPwaUpdateStatus() {
+  const status = document.getElementById("pwa-update-status");
+  if (status) status.hidden = false;
+}
+
+async function promptAppInstall() {
+  if (deferredInstallPrompt) {
+    const promptEvent = deferredInstallPrompt;
+    deferredInstallPrompt = null;
+    try {
+      await promptEvent.prompt();
+      const choice = await promptEvent.userChoice;
+      toast(choice?.outcome === "accepted" ? "Marvel Chat installation started." : "Installation was not selected.", "info");
+    } catch (error) {
+      console.debug("[Marvel Chat] install prompt unavailable", error?.name || error?.message);
+      toast("Use your browser menu and choose Install app or Add to Home screen when available.", "info");
+    }
+    return;
+  }
+  toast("Use your browser menu and choose Install app or Add to Home screen when available.", "info");
+}
+
+async function checkForAppUpdate() {
+  if (!navigator.onLine) {
+    toast("Connect to the internet to check for updates.", "info");
+    return;
+  }
+  if (!("serviceWorker" in navigator)) {
+    toast("App updates are managed by your browser on this device.", "info");
+    return;
+  }
+  try {
+    const registration = await navigator.serviceWorker.getRegistration();
+    if (!registration) {
+      await navigator.serviceWorker.register("./sw.js");
+    } else {
+      await registration.update();
+      if (registration.waiting) registration.waiting.postMessage({type: "SKIP_WAITING"});
+    }
+    toast("Marvel Chat checked for updates.", "success");
+  } catch (error) {
+    console.debug("[Marvel Chat] update check failed", error?.message);
+    toast("The app update check failed. Please try again when online.", "error");
+  }
+}
+
+window.addEventListener("beforeinstallprompt", (event) => {
+  event.preventDefault();
+  deferredInstallPrompt = event;
+});
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  toast("Marvel Chat has been installed.", "success");
+});
+window.addEventListener("online", syncConnectionStatus);
+window.addEventListener("offline", syncConnectionStatus);
+syncConnectionStatus();
+
+if ("serviceWorker" in navigator) {
+  let hadController = Boolean(navigator.serviceWorker.controller);
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController) showPwaUpdateStatus();
+    hadController = true;
+  });
+  navigator.serviceWorker.register("./sw.js")
+    .then((registration) => {
+      if (registration.waiting && navigator.serviceWorker.controller) showPwaUpdateStatus();
+      return registration.update().catch(() => {});
+    })
+    .catch((error) => console.debug("[Marvel Chat] offline shell registration unavailable", error?.message));
+}
+
 app.innerHTML=`<main class="splash"><section class="splash-card"><div class="brand-mark brand-mark-xl"><img src="./assets/brand/icon-512.png" alt="Marvel Chat"></div><h1>Marvel Chat</h1><p>by Davonium Technologies</p><div class="loader"><span></span></div></section></main>`;
 
 onAuthStateChanged(auth, async (user) => {

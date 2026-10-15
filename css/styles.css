@@ -421,3 +421,20 @@ html[data-theme="dark"]{
 .legal-modal-switcher button.active{background:linear-gradient(115deg,#7c3aed,#db2777,#0891b2);color:white;border-color:transparent;box-shadow:0 5px 16px rgba(124,58,237,.2);}
 @media(max-width:560px){.discovery-overlay{padding:10px max(10px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));}.discovery-banner{max-height:calc(100dvh - 20px);padding:22px 17px;border-radius:23px;gap:17px}.discovery-banner-options{grid-template-columns:1fr}.discovery-option{min-height:78px;grid-template-columns:54px minmax(0,1fr) 18px;padding:10px}.discovery-option-art{width:54px;height:54px}.discovery-banner-intro h2{font-size:clamp(1.65rem,8vw,2.2rem)}.moment-ring{width:102px;height:102px;padding:6px}.moment-card{min-width:108px}.post-carousel-slide{aspect-ratio:4/3;max-height:55svh;min-height:0}.legal-modal-hero{grid-template-columns:48px minmax(0,1fr);padding:18px 14px}.legal-modal-mark{width:48px;height:48px;min-width:48px}.legal-modal-switcher{gap:6px}.legal-modal-switcher button{font-size:.7rem;padding:7px 9px;}}
 @media(prefers-reduced-motion:reduce){.moment-card.has-moment .moment-ring,.discovery-overlay,.discovery-banner-brand img{animation:none!important;transition:none!important}.discovery-banner::before,.discovery-banner-glimmer,.discovery-art-orbit,.discovery-art-spark{animation:none!important}}
+
+
+/* Production integration: corporate support, PWA install/update and offline status. */
+.menu-external{color:var(--text);text-decoration:none;}
+.menu-external:hover{background:var(--surface2);}
+.company-links{display:flex;flex-wrap:wrap;gap:9px 14px;padding:14px 4px 2px;border-top:1px solid var(--line);font-size:.78rem;font-weight:800;}
+.company-links a,.company-contact-links a{color:var(--accent);text-decoration:none;}
+.company-links a:hover,.company-contact-links a:hover{text-decoration:underline;}
+.company-contact-links{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);font-size:.78rem;line-height:1.5;}
+.connection-status,.pwa-update-status{position:fixed;z-index:5000;left:max(10px,env(safe-area-inset-left));right:max(10px,env(safe-area-inset-right));display:flex;align-items:center;justify-content:center;gap:10px;padding:10px 14px;border:1px solid rgba(255,255,255,.25);border-radius:14px;background:linear-gradient(110deg,#4f46e5,#a21caf,#db2777,#0f766e);color:white;box-shadow:0 9px 28px rgba(28,18,60,.24);font-size:.78rem;font-weight:750;line-height:1.4;}
+.connection-status{top:max(8px,env(safe-area-inset-top));}
+.pwa-update-status{top:max(8px,env(safe-area-inset-top));justify-content:space-between;}
+.connection-status[hidden],.pwa-update-status[hidden]{display:none!important;}
+.connection-status-dot{width:9px;height:9px;min-width:9px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 4px rgba(251,191,36,.2);}
+.pwa-update-status button{border:1px solid rgba(255,255,255,.55);border-radius:999px;padding:7px 10px;background:rgba(255,255,255,.14);color:white;font-size:.75rem;font-weight:900;white-space:nowrap;}
+@media(max-width:480px){.connection-status,.pwa-update-status{font-size:.72rem;padding:9px 10px;border-radius:12px}.company-contact-links{gap:7px 10px;font-size:.72rem}.company-links{font-size:.75rem}}
+@media(prefers-reduced-motion:reduce){.connection-status,.pwa-update-status{scroll-behavior:auto}}

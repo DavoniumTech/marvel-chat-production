@@ -21,9 +21,17 @@
   <link rel="apple-touch-icon" href="./assets/brand/icon-192.png">
   <link rel="stylesheet" href="./css/styles.css">
   <title>Marvel Chat — Connect, discover, and grow</title>
-  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebApplication","name":"Marvel Chat","applicationCategory":"SocialNetworkingApplication","operatingSystem":"Web","url":"https://marvelchat.davoniumtech.com/","publisher":{"@type":"Organization","name":"Davonium Technologies","url":"https://davoniumtech.com/"}}</script>
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebApplication","name":"Marvel Chat","applicationCategory":"SocialNetworkingApplication","operatingSystem":"Web","url":"https://marvelchat.davoniumtech.com/","publisher":{"@type":"Organization","name":"Davonium Technologies","url":"https://www.davoniumtech.com/"}}</script>
 </head>
 <body>
+  <div id="connection-status" class="connection-status" role="status" aria-live="polite" hidden>
+    <span class="connection-status-dot" aria-hidden="true"></span>
+    <span>You’re offline. The cached app shell is available; live data, chat and uploads need an internet connection.</span>
+  </div>
+  <div id="pwa-update-status" class="pwa-update-status" role="status" aria-live="polite" hidden>
+    <span>A Marvel Chat update is ready.</span>
+    <button type="button" data-action="refresh-app">Refresh app</button>
+  </div>
   <div id="app"></div><div id="modal-root"></div><div id="toast-root" aria-live="polite" aria-atomic="true"></div>
   <script type="module" src="./js/app.js"></script>
 </body>

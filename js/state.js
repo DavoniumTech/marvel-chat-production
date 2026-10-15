@@ -44,7 +44,7 @@ export const state = {
   notifications: [],
   unreadNotifications: 0,
   searchQuery: "",
-  searchScope: "all",
+  searchScope: "people_posts",
   theme: localStorage.getItem("marvel-theme") || "system",
   resolvedTheme: "light",
   loadingRoute: false,

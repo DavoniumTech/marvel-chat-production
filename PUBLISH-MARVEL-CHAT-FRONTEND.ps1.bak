@@ -1,0 +1,96 @@
+param(
+  [Parameter(Position=0)]
+  [string]$Destination
+)
+$ErrorActionPreference = 'Stop'
+function Stop-Release([string]$Message) { Write-Host "STOP: $Message" -ForegroundColor Red; exit 1 }
+function Invoke-Git([string[]]$GitArgs) {
+  $result = & git @GitArgs 2>&1
+  if ($LASTEXITCODE -ne 0) { $result | ForEach-Object { Write-Host $_ }; Stop-Release ("Git command failed: git " + ($GitArgs -join ' ')) }
+  return $result
+}
+
+$Source = [IO.Path]::GetFullPath($PSScriptRoot)
+if ([string]::IsNullOrWhiteSpace($Destination)) {
+  $Destination = Read-Host 'Git checkout path'
+}
+if ([string]::IsNullOrWhiteSpace($Destination)) { Stop-Release 'No destination was supplied.' }
+$Repo = [IO.Path]::GetFullPath($Destination.Trim([char]'"'))
+if ($Repo -eq $Source) { Stop-Release 'Release folder cannot be the Git destination.' }
+if (!(Test-Path (Join-Path $Source 'index.html')) -or !(Test-Path (Join-Path $Source 'js/app.js'))) {
+  Stop-Release 'Release folder is missing index.html or js/app.js.'
+}
+if (!(Test-Path (Join-Path $Repo '.git'))) { Stop-Release 'Destination is not an existing Git checkout.' }
+
+$remote = ((Invoke-Git -GitArgs @('-C', $Repo, 'remote', 'get-url', 'origin')) | Out-String).Trim()
+$allowed = @(
+  'https://github.com/DavoniumTech/marvel-chat-production.git',
+  'https://github.com/DavoniumTech/marvel-chat-production',
+  'git@github.com:DavoniumTech/marvel-chat-production.git',
+  'ssh://git@github.com/DavoniumTech/marvel-chat-production.git'
+)
+if ($remote -notin $allowed) { Stop-Release "Unexpected origin: $remote" }
+$branch = ((Invoke-Git -GitArgs @('-C', $Repo, 'branch', '--show-current')) | Out-String).Trim()
+if ($branch -ne 'main') { Stop-Release "Expected main branch; found $branch" }
+$upstream = ((Invoke-Git -GitArgs @('-C', $Repo, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}')) | Out-String).Trim()
+if ($upstream -ne 'origin/main') { Stop-Release "Expected origin/main upstream; found $upstream" }
+$dirty = @(& git -C $Repo status --porcelain)
+if ($LASTEXITCODE -ne 0) { Stop-Release 'Could not inspect working tree.' }
+if ($dirty.Count -gt 0) { $dirty | ForEach-Object { Write-Host $_ }; Stop-Release 'Destination has local changes. Nothing copied.' }
+
+Write-Host "Destination: $Repo"
+Write-Host "Origin:      $remote"
+Write-Host "Branch:      $branch"
+Write-Host "Upstream:    $upstream"
+Invoke-Git -GitArgs @('-C', $Repo, 'fetch', 'origin', 'main') | Out-Null
+$countText = ((Invoke-Git -GitArgs @('-C', $Repo, 'rev-list', '--left-right', '--count', 'HEAD...origin/main')) | Out-String).Trim()
+$counts = $countText -split '\s+'
+if ($counts.Count -lt 2 -or $counts[0] -ne '0' -or $counts[1] -ne '0') {
+  Stop-Release "Local main must match origin/main. Counts HEAD...origin/main: $countText. Run git pull --ff-only origin main and retry."
+}
+
+$confirm = Read-Host 'Type CONFIRM-PRODUCTION-BRANCH to authorize copying into this checkout'
+if ($confirm -cne 'CONFIRM-PRODUCTION-BRANCH') { Stop-Release 'Production branch confirmation not received.' }
+
+$skipDirs = @('.git', 'node_modules', '.firebase', '__pycache__', '.cache')
+$files = Get-ChildItem -LiteralPath $Source -File -Recurse -Force | Where-Object {
+  $relative = $_.FullName.Substring($Source.Length).TrimStart([char[]]@([char]92, [char]47))
+  $parts = $relative -split '[\\/]'
+  $base = $_.Name.ToLowerInvariant()
+  -not ($parts | Where-Object { $_ -in $skipDirs }) -and
+  $base -ne '.env' -and -not $base.StartsWith('.env.') -and
+  $base -notmatch '\.(pem|key|p12|pfx)$' -and
+  $base -notmatch '\.zip$'
+}
+foreach ($file in $files) {
+  $relative = $file.FullName.Substring($Source.Length).TrimStart([char[]]@([char]92, [char]47))
+  $target = Join-Path $Repo $relative
+  $targetDir = Split-Path -Parent $target
+  if (!(Test-Path $targetDir)) { New-Item -ItemType Directory -Path $targetDir -Force | Out-Null }
+  Copy-Item -LiteralPath $file.FullName -Destination $target -Force
+}
+
+$node = Get-Command node -ErrorAction SilentlyContinue
+if (!$node) { Stop-Release 'Node.js is required for the syntax check. Nothing has been committed.' }
+$manifestPath = Join-Path $Repo 'manifest.json'
+try { Get-Content -Raw $manifestPath | ConvertFrom-Json | Out-Null } catch { Stop-Release 'manifest.json is invalid.' }
+$jsFiles = Get-ChildItem -LiteralPath (Join-Path $Repo 'js') -File -Recurse -Filter '*.js'
+foreach ($file in $jsFiles) {
+  & node --check $file.FullName
+  if ($LASTEXITCODE -ne 0) { Stop-Release "JavaScript syntax failed: $($file.FullName)" }
+}
+Invoke-Git -GitArgs @('-C', $Repo, 'diff', '--check') | Out-Null
+Invoke-Git -GitArgs @('-C', $Repo, 'add', '-A') | Out-Null
+Invoke-Git -GitArgs @('-C', $Repo, 'diff', '--cached', '--check') | Out-Null
+$diff = & git -C $Repo diff --cached --quiet
+$diffCode = $LASTEXITCODE
+if ($diffCode -eq 0) { Write-Host 'NO CHANGES: Nothing to push.'; exit 0 }
+if ($diffCode -ne 1) { Stop-Release 'Could not verify staged changes.' }
+Write-Host "`nProposed production changes:"
+Invoke-Git -GitArgs @('-C', $Repo, 'diff', '--cached', '--stat') | ForEach-Object { Write-Host $_ }
+$publish = Read-Host 'Type PUBLISH-MARVEL-CHAT to commit and push these changes'
+if ($publish -cne 'PUBLISH-MARVEL-CHAT') { Stop-Release 'Publish confirmation not received. Changes remain uncommitted locally.' }
+$commitMessage = 'Integrate Davonium links and PWA reliability 2026-10-15'
+Invoke-Git -GitArgs @('-C', $Repo, 'commit', '-m', $commitMessage) | ForEach-Object { Write-Host $_ }
+Invoke-Git -GitArgs @('-C', $Repo, 'push', 'origin', 'main') | ForEach-Object { Write-Host $_ }
+Write-Host 'GIT_PUSH_COMPLETED. Verify Cloudflare deployment before declaring the live app updated.' -ForegroundColor Green
