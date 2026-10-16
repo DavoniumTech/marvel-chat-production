@@ -1,11 +1,7 @@
-const CACHE = "marvel-chat-shell-20261016-integration-2";
+const CACHE = "marvel-chat-shell-20261016-12";
 const SHELL = [
   "./",
   "./index.html",
-  "./terms.html",
-  "./privacy.html",
-  "./community.html",
-  "./community-guidelines.html",
   "./manifest.json",
   "./css/styles.css",
   "./js/app.js",

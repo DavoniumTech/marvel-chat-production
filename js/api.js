@@ -12,7 +12,7 @@ const names = [
   "createStore", "updateStoreProfile", "setStoreStatus", "createProduct", "updateProduct",
   "setProductInventory", "setProductAvailability", "archiveProduct", "createProductCategory",
   "createMarketCommerceRequest", "updateMarketCommerceRequestStatus", "createMarketProductReview",
-  "discoverMarketProducts", "saveMarketProduct", "getMySavedMarketProducts", "search",
+  "saveMarketProduct", "getMySavedMarketProducts", "discoverMarketProducts", "search",
   "createMediaUpload", "finalizeMediaUpload", "createMediaReadUrls", "cleanupDeletedMedia", "getMyMediaDailyUsage",
   "followUser", "unfollowUser", "getFollowState", "getFollowList", "reportContent"
 ];

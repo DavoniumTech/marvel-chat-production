@@ -23,7 +23,7 @@ import {
 const app = document.getElementById("app");
 const routes = [
   "home", "chat", "skills", "market", "profile", "search", "saved-posts",
-  "notifications", "settings", "help", "skill-profile", "business",
+  "notifications", "settings", "skill-profile", "business", "help",
   "seller-onboarding", "skill-onboarding"
 ];
 const MARKET_CATEGORIES = [
@@ -45,10 +45,27 @@ const SKILL_CATEGORIES = [
 let authMode = "welcome";
 let googleSignInPending = false;
 let deferredInstallPrompt = null;
+let offlineToastActive = false;
 let homePaginationObserver = null;
 let catalogueMediaObserver = null;
 const carouselHydrationTimers = new Map();
 let momentAutoCloseTimer = null;
+window.addEventListener("beforeinstallprompt", (event) => {
+  // Defer the browser prompt: users choose Install from the menu when ready.
+  event.preventDefault();
+  deferredInstallPrompt = event;
+});
+window.addEventListener("appinstalled", () => {
+  deferredInstallPrompt = null;
+  toast("Marvel Chat was installed successfully.", "success");
+});
+window.addEventListener("offline", () => {
+  if (offlineToastActive) return;
+  offlineToastActive = true;
+  toast("You’re offline. Your current screen stays open; live actions will resume when you reconnect.", "info");
+});
+window.addEventListener("online", () => { offlineToastActive = false; });
+
 const DISCOVERY_BANNER_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const DISCOVERY_BANNER_AUTO_DISMISS_MS = 30 * 1000;
 let discoveryBannerVisibleForUser = null;
@@ -221,18 +238,14 @@ function sideMenu() {
       <button class="menu-item" type="button" data-action="route-search">${icon("search")}Search</button>
       <button class="menu-item" type="button" data-action="route-notifications">${icon("bell")}Notifications</button>
       <button class="menu-item" type="button" data-action="route-saved-posts">${icon("bookmark")}Saved posts</button>
+      <button class="menu-item" type="button" data-action="install-app">${icon("download")}Install Marvel Chat</button>
+      <button class="menu-item" type="button" data-action="route-help">${icon("help")}How to use Marvel Chat</button>
       <button class="menu-item" type="button" data-action="route-settings">${icon("settings")}Settings</button>
-      <button class="menu-item" type="button" data-action="route-help">${icon("help-circle")}Help & how to use Marvel Chat</button>
       <button class="menu-item" type="button" data-action="feedback">${icon("message")}Feedback</button>
       <div class="menu-sep"></div>
       <button class="menu-item" type="button" data-action="legal-terms">${icon("file")}Terms</button>
       <button class="menu-item" type="button" data-action="legal-privacy">${icon("lock")}Privacy</button>
       <button class="menu-item" type="button" data-action="legal-community">${icon("shield")}Community Guidelines</button>
-      <div class="menu-sep"></div>
-      <button class="menu-item" type="button" data-action="install-app">Install Marvel Chat</button>
-      <button class="menu-item" type="button" data-action="check-app-update">Check for app update</button>
-      <a class="menu-item menu-anchor" href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">Davonium Technologies website ↗</a>
-      <a class="menu-item menu-anchor" href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">Contact the company ↗</a>
       <div class="menu-foot">Davonium Technologies · © 2026</div>
       <button class="menu-item menu-sign-out" type="button" data-action="sign-out">${icon("logout")}Sign out</button>
     </aside>
@@ -240,7 +253,7 @@ function sideMenu() {
 }
 
 function shell(content, noBottom = false) {
-  return `<div class="app-shell">${topbar()}<main class="main-scroll">${content}</main>${noBottom ? "" : bottomBar()}</div>`;
+  return `<div class="app-shell${noBottom ? " chat-open-shell" : ""}">${topbar()}<main class="main-scroll">${content}</main>${noBottom ? "" : bottomBar()}</div>`;
 }
 function emptyState(title, text, action = "", label = "") {
   return `<div class="empty-state"><div class="empty-icon">${icon("spark",19)}</div><strong>${esc(title)}</strong><span>${esc(text)}</span>${action ? `<button class="btn btn-secondary" type="button" data-action="${esc(action)}">${esc(label)}</button>` : ""}</div>`;
@@ -266,35 +279,68 @@ function postTextHtml(value) {
   return esc(value).replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>");
 }
 function postFormatToolbar(targetId) {
-  return `<div class="post-format-toolbar" role="group" aria-label="Text formatting"><button class="format-button format-bold" type="button" data-action="format-post-bold" data-target="${esc(targetId)}" aria-label="Make selected text bold"><strong>B</strong></button><button class="format-button" type="button" data-action="format-post-normal" data-target="${esc(targetId)}">Normal</button><small>Select text first, then choose Bold or Normal.</small></div>`;
+  return `<div class="post-format-toolbar" role="group" aria-label="Text formatting"><button class="format-button format-bold" type="button" data-action="format-post-bold" data-target="${esc(targetId)}" aria-label="Make selected text bold"><strong>B</strong></button><button class="format-button" type="button" data-action="format-post-normal" data-target="${esc(targetId)}">Normal</button><small>Select text, then choose Bold or Normal. Formatting is not shown as markup.</small></div>`;
+}
+function markdownToRichEditor(value) {
+  return esc(String(value || "")).replace(/\*\*([\s\S]+?)\*\*/g, "<strong>$1</strong>").replace(/\r?\n/g, "<br>");
+}
+function richEditorNodeToText(node) {
+  if (!node) return "";
+  if (node.nodeType === Node.TEXT_NODE) return node.nodeValue || "";
+  if (node.nodeType !== Node.ELEMENT_NODE) return "";
+  const tag = node.tagName;
+  if (tag === "BR") return "\n";
+  const inner = [...node.childNodes].map(richEditorNodeToText).join("");
+  if (tag === "STRONG" || tag === "B") return inner ? `**${inner}**` : "";
+  if (["DIV", "P"].includes(tag)) return inner + "\n";
+  // Unknown pasted markup is flattened to text; formatting is restricted to bold.
+  return inner;
+}
+function richEditorMarkdown(targetId) {
+  const editor = document.getElementById(targetId);
+  if (!editor) return "";
+  return [...editor.childNodes].map(richEditorNodeToText).join("").replace(/\n+$/g, "").replace(/\u00a0/g, " ");
 }
 function applyPostTextFormatting(targetId, mode) {
   const field = document.getElementById(targetId);
-  if (!field) return;
-  const value = field.value || "";
-  const start = Number(field.selectionStart || 0);
-  const end = Number(field.selectionEnd || start);
-  if (mode === "bold") {
-    const selected = value.slice(start, end);
-    if (!selected) {
-      const insert = "**bold text**";
-      field.setRangeText(insert, start, end, "select");
-      field.setSelectionRange(start + 2, start + insert.length - 2);
-    } else {
-      const alreadyBold = selected.startsWith("**") && selected.endsWith("**") && selected.length >= 4;
-      const content = alreadyBold ? selected.slice(2, -2) : selected;
-      const wrapped = alreadyBold ? content : `**${content}**`;
-      field.setRangeText(wrapped, start, end, "select");
-      if (!alreadyBold) field.setSelectionRange(start + 2, start + wrapped.length - 2);
-    }
-  } else {
-    const selection = start === end ? value : value.slice(start, end);
-    const target = selection || value;
-    const normal = target.replace(/\*\*([\s\S]+?)\*\*/g, "$1");
-    if (selection) field.setRangeText(normal, start, end, "select");
-    else { field.value = normal; field.setSelectionRange(Math.min(start, normal.length), Math.min(start, normal.length)); }
+  if (!field || !field.isContentEditable) return;
+  const selection = window.getSelection();
+  if (!selection || selection.rangeCount === 0 || selection.isCollapsed ||
+      !field.contains(selection.anchorNode) || !field.contains(selection.focusNode)) {
+    toast("Select the text you want to format first.", "info");
+    return;
   }
-  field.focus();
+  // Preserve the user's selection and manipulate only the selected fragment.
+  // This avoids editor engines inserting literal Markdown markers into the UI.
+  const range = selection.getRangeAt(0).cloneRange();
+  const selectedText = range.toString();
+  if (!selectedText) {
+    toast("Select the text you want to format first.", "info");
+    return;
+  }
+  const fragment = range.extractContents();
+  if (mode === "normal") {
+    fragment.querySelectorAll?.("strong, b").forEach((node) => {
+      node.replaceWith(...node.childNodes);
+    });
+    const parent = range.startContainer?.parentElement;
+    if (parent && field.contains(parent) && parent.matches("strong, b") && parent.childNodes.length === 1) {
+      parent.replaceWith(...parent.childNodes);
+    }
+    range.insertNode(fragment);
+  } else {
+    const wrapper = document.createElement("strong");
+    wrapper.append(fragment);
+    range.insertNode(wrapper);
+  }
+  selection.removeAllRanges();
+  const caret = document.createRange();
+  caret.selectNodeContents(field);
+  caret.collapse(false);
+  selection.addRange(caret);
+  const hiddenId = targetId === "post-text-editor" ? "post-text" : "edit-post-text";
+  const hidden = document.getElementById(hiddenId);
+  if (hidden) hidden.value = richEditorMarkdown(targetId);
 }
 
 function participants(t) { return Array.isArray(t.participantIds) ? t.participantIds : (Array.isArray(t.participantUids) ? t.participantUids : []); }
@@ -404,7 +450,7 @@ function searchResultCard(item) {
     return `<article class="result compact-result">${avatar(p,"sm",true)}<div class="grow"><strong>${esc(item?.title || p.displayName || p.username || "Member")}</strong><small>${esc(item?.subtitle || item?.subTitle || (p.username ? `@${p.username}` : p.bio || "Community member"))}</small></div>${id && id !== state.user.uid ? `<div class="result-actions"><button class="btn btn-secondary" type="button" data-action="view-user" data-id="${esc(id)}">View</button><button class="btn btn-secondary" type="button" data-action="message-user" data-id="${esc(id)}">Message</button><button class="btn btn-secondary" type="button" data-action="${following ? "unfollow-user" : "follow-user"}" data-id="${esc(id)}">${following ? "Following" : "Follow"}</button></div>` : ""}</article>`;
   }
   if (type === "post") {
-    return `<article class="result compact-result"><div class="result-icon">${icon("grid",18)}</div><button class="search-post-summary grow" type="button" data-action="open-search-post" data-id="${esc(item?.id || "")}" data-author="${esc(item?.authorUid || "")}" aria-label="Open post preview"><strong>${esc(item?.title || "Community post")}</strong><small>${esc(item?.subtitle || "Public community update")}</small><small class="muted">Post · ${esc(when(item?.createdAt || item?.updatedAt))}</small></button><span class="muted">Post</span></article>`;
+    return `<article class="result compact-result"><div class="result-icon">${icon("grid",18)}</div><div class="grow"><strong>${esc(item?.title || "Community post")}</strong><small>${esc(item?.subtitle || "Public community update")}</small><small class="muted">Post · ${esc(when(item?.createdAt || item?.updatedAt))}</small></div><span class="muted">Post</span></article>`;
   }
   if (type === "skill_listing") {
     return `<article class="result compact-result"><div class="result-icon">${icon("skills",18)}</div><div class="grow"><strong>${esc(item?.title || p.title || "Skill listing")}</strong><small>${esc(item?.subtitle || item?.subTitle || p.description || "")}</small></div><button class="btn btn-secondary" type="button" data-action="skill-search-view" data-id="${esc(item.id || "")}">View</button></article>`;
@@ -416,7 +462,8 @@ function contextualSearch(formId, placeholder, scope, value = "") {
   return `<form id="${esc(formId)}" class="context-search"><div class="context-search-box">${icon("search",18)}<input name="query" value="${esc(value)}" maxlength="80" placeholder="${esc(placeholder)}" aria-label="${esc(placeholder)}" autocomplete="off"><button type="submit" aria-label="Search">${icon("arrow",18)}</button></div><input type="hidden" name="scope" value="${esc(scope)}"></form>`;
 }
 
-async function loadProfile() {
+async function loadProfile(force = false) {
+  if (!force && state.profileLoadedAt && Date.now() - state.profileLoadedAt < 60_000 && state.profile?.uid === state.user?.uid) return;
   let snap = await getDoc(doc(db, "users", state.user.uid));
   if (!snap.exists()) {
     await api.ensureUserProfile();
@@ -450,6 +497,7 @@ async function loadProfile() {
       postCount: Number(stats?.postCount ?? state.profile.postCount ?? state.profile.postsCount ?? 0)
     };
   } catch {}
+  state.profileLoadedAt = Date.now();
 }
 
 async function loadHome({reset = !state.homeLoaded} = {}) {
@@ -535,6 +583,9 @@ function updateRenderedPostMedia(post, indices) {
           media.alt = label;
           media.loading = Number(track.dataset.currentIndex || track.dataset.startIndex || 0) === index ? "eager" : "lazy";
           media.decoding = "async";
+          media.dataset.postMedia = "true";
+          media.dataset.postId = String(post.id);
+          media.dataset.mediaIndex = String(index);
           media.fetchPriority = index === 0 ? "high" : "auto";
         }
         media.src = item.url;
@@ -622,14 +673,11 @@ async function refreshNotificationSummary() {
   return result;
 }
 
-async function loadThreads() {
+async function loadThreads(force = false) {
+  if (!force && state.threadsLoadedAt && Date.now() - state.threadsLoadedAt < 30_000) return;
   const s = await getDocs(query(collection(db,"chatThreads"), where("participantIds","array-contains",state.user.uid), limit(50)));
-  state.threads = s.docs.map((d) => ({id:d.id,...d.data()})).sort((a,b) => {
-    const aPinned = Array.isArray(a.pinnedUids) && a.pinnedUids.includes(state.user.uid);
-    const bPinned = Array.isArray(b.pinnedUids) && b.pinnedUids.includes(state.user.uid);
-    if (aPinned !== bPinned) return aPinned ? -1 : 1;
-    return stamp(b.updatedAt || b.lastMessageAt) - stamp(a.updatedAt || a.lastMessageAt);
-  });
+  state.threads = s.docs.map((d) => ({id:d.id,...d.data()})).sort((a,b) => stamp(b.updatedAt || b.lastMessageAt) - stamp(a.updatedAt || a.lastMessageAt));
+  state.threadsLoadedAt = Date.now();
 }
 
 async function findOrCreateDirectThread(targetUid, profile) {
@@ -655,21 +703,24 @@ async function loadMessages(id) {
   try { await api.markThreadRead({threadId:id}); } catch {}
 }
 
-async function loadSkills() {
+async function loadSkills(force = false) {
+  if (!force && state.skillsLoadedAt && Date.now() - state.skillsLoadedAt < 60_000) return Promise.resolve();
   const [listingSnap, categorySnap] = await Promise.all([
     getDocs(query(collection(db,"skillListings"), where("status","==","active"), limit(40))),
     getDocs(query(collection(db,"skillCategories"), where("status","==","active"), limit(50))).catch(() => ({docs:[]}))
   ]);
   state.skills = listingSnap.docs.map((d) => ({id:d.id,...d.data()}));
+  state.skillsLoadedAt = Date.now();
   state.skillCategories = categorySnap.docs.map((d) => ({id:d.id,...d.data()}));
   void Promise.all(state.skills.slice(0, 8).map((item) => hydrateSkillListingMedia(item))).then(() => { if (state.route === "skills") paint(); });
 }
 
-async function loadSkillWorkspace() {
+async function loadSkillWorkspace(force = false) {
+  if (!force && state.skillWorkspaceLoadedAt && Date.now() - state.skillWorkspaceLoadedAt < 45_000) return;
   const profileSnap = await getDoc(doc(db,"skillProfiles",state.user.uid));
   state.skillProfile = profileSnap.exists() ? {uid:state.user.uid,...profileSnap.data()} : null;
   const listingSnap = await getDocs(query(collection(db,"skillListings"), where("providerUid","==",state.user.uid), limit(50)));
-  state.skillListingsMine = listingSnap.docs.map((d) => ({id:d.id,...d.data()})).filter((item) => item.status !== "deleted");
+  state.skillListingsMine = listingSnap.docs.map((d) => ({id:d.id,...d.data()}));
   void Promise.all(state.skillListingsMine.slice(0, 8).map((item) => hydrateSkillListingMedia(item))).then(() => { if (state.route === "skill-profile") paint(); });
   const [reqA, reqB] = await Promise.all([
     getDocs(query(collection(db,"skillRequests"), where("requesterUid","==",state.user.uid), limit(40))).catch(() => ({docs:[]})),
@@ -678,38 +729,57 @@ async function loadSkillWorkspace() {
   const map = new Map();
   [...reqA.docs,...reqB.docs].forEach((d) => map.set(d.id,{id:d.id,...d.data()}));
   state.skillRequests = [...map.values()].sort((a,b) => stamp(b.updatedAt || b.createdAt) - stamp(a.updatedAt || a.createdAt));
+  state.skillWorkspaceLoadedAt = Date.now();
 }
 
-async function loadMarket() {
-  const sharedTasks = [
-    getDocs(query(collection(db,"productCategories"), where("status","==","active"), limit(50))).catch(() => ({docs:[]})),
-    getDocs(query(collection(db,"stores"), where("ownerUid","==",state.user.uid), limit(1))).catch(() => ({docs:[]})),
-    api.getMySavedMarketProducts({limit: 40}).catch((error) => {
-      console.debug("[Marvel Chat] saved Market list unavailable", error?.code || error?.message);
-      return {productIds: [], products: []};
-    })
-  ];
-  if (!state.marketStoresLoaded) {
-    sharedTasks.push(getDocs(query(collection(db,"stores"), where("status","==","active"), limit(24))).catch(() => ({docs:[]})));
-  }
-  const [r, categorySnap, storeSnap, savedResult, publicStoresSnap] = await Promise.all([
-    api.discoverMarketProducts({query: state.searchQuery || "", scope:"all"}),
-    ...sharedTasks
+async function loadMarket(force = false) {
+  const queryText = String(state.searchQuery || "").trim();
+  // Keep catalogue data in memory for 60 seconds to avoid repeated reads when
+  // switching between tabs, opening details, and returning to Market.
+  if (!force && state.marketLoaded && state.marketCacheQuery === queryText &&
+      Date.now() - Number(state.marketCacheAt || 0) < 60_000) return;
+
+  const [productsResult, categoryResult, ownStoreResult, shopsResult, savedResult] = await Promise.allSettled([
+    api.discoverMarketProducts({query: queryText, limit: 30}),
+    getDocs(query(collection(db,"productCategories"), where("status","==","active"), limit(50))),
+    getDocs(query(collection(db,"stores"), where("ownerUid","==",state.user.uid), limit(1))),
+    getDocs(query(collection(db,"stores"), where("status","==","active"), limit(12))),
+    api.getMySavedMarketProducts({limit: 40})
   ]);
-  state.products = Array.isArray(r?.results) ? r.results : [];
-  state.marketCategories = categorySnap.docs.map((d) => ({id:d.id,...d.data()}));
-  state.myStore = storeSnap.docs.length ? {id:storeSnap.docs[0].id,...storeSnap.docs[0].data()} : state.myStore;
-  state.savedMarketProductIds = Array.isArray(savedResult?.productIds) ? savedResult.productIds.map(String) : [];
-  state.savedMarketProducts = Array.isArray(savedResult?.products) ? savedResult.products : [];
-  if (publicStoresSnap) {
-    state.marketStores = publicStoresSnap.docs.map((d) => ({id:d.id,...d.data()})).filter((store) => store.status === "active");
-    state.marketStoresLoaded = true;
+  if (productsResult.status !== "fulfilled") throw productsResult.reason;
+  const response = productsResult.value;
+  state.products = (Array.isArray(response?.results) ? response.results : []).map((item) => ({
+    ...item,
+    id: item.id || item.productId || "",
+    storeName: item.storeName || item.storeSnapshot?.name || "Marvel Market shop"
+  })).filter((item) => item.id);
+  state.marketCategories = categoryResult.status === "fulfilled"
+    ? categoryResult.value.docs.map((d) => ({id:d.id,...d.data()})) : state.marketCategories;
+  if (ownStoreResult.status === "fulfilled") {
+    state.myStore = ownStoreResult.value.docs.length
+      ? {id:ownStoreResult.value.docs[0].id,...ownStoreResult.value.docs[0].data()}
+      : state.myStore;
   }
-  const catalogue = state.marketShowSaved ? state.savedMarketProducts : state.products;
-  void Promise.all(catalogue.slice(0, 8).map((item) => hydrateMarketProductMedia(item))).then(() => { if (state.route === "market") paint(); });
+  state.marketStores = shopsResult.status === "fulfilled"
+    ? shopsResult.value.docs.map((d) => ({id:d.id,...d.data()})).sort((a,b) => stamp(b.createdAt || b.updatedAt) - stamp(a.createdAt || a.updatedAt))
+    : state.marketStores;
+  if (savedResult.status === "fulfilled") {
+    state.marketSavedProductIds = Array.isArray(savedResult.value?.productIds)
+      ? savedResult.value.productIds.map(String) : [];
+    state.savedMarketProducts = Array.isArray(savedResult.value?.products)
+      ? savedResult.value.products.map((item) => ({...item, id:item.id || item.productId || ""})) : [];
+  } else {
+    console.debug("[Marvel Chat] saved Market items unavailable", savedResult.reason?.code);
+  }
+  state.marketCacheQuery = queryText;
+  state.marketCacheAt = Date.now();
+  state.marketLoaded = true;
+  void Promise.all(state.products.slice(0, 8).map((item) => hydrateMarketProductMedia(item)))
+    .then(() => { if (state.route === "market") paint(); });
 }
 
-async function loadBusinessWorkspace() {
+async function loadBusinessWorkspace(force = false) {
+  if (!force && state.businessLoadedAt && Date.now() - state.businessLoadedAt < 45_000) return;
   const [storeSnap, categorySnap] = await Promise.all([
     getDocs(query(collection(db,"stores"), where("ownerUid","==",state.user.uid), limit(10))),
     getDocs(query(collection(db,"productCategories"), where("status","==","active"), limit(50))).catch(() => ({docs:[]}))
@@ -730,42 +800,53 @@ async function loadBusinessWorkspace() {
   } else {
     state.commerceRequests = [];
   }
+  state.businessLoadedAt = Date.now();
 }
 
-async function hydrateMarketProductMedia(item) {
+async function hydrateMarketProductMedia(item, force = false) {
   const product = item?.result || item;
   if (!product?.id || !Array.isArray(product.mediaIds) || !product.mediaIds.length) return;
-  if (Array.isArray(product.mediaUrls)) return product.mediaUrls;
+  const freshForMs = 5 * 60 * 1000;
+  if (force) { product.mediaUrls = null; product.mediaLoadPromise = null; product.mediaUrlFetchedAt = 0; }
+  if (Array.isArray(product.mediaUrls) && product.mediaUrls.length && product.mediaUrlFetchedAt && Date.now() - product.mediaUrlFetchedAt < freshForMs) return product.mediaUrls;
   if (product.mediaLoadPromise) return product.mediaLoadPromise;
   product.mediaLoading = true;
   product.mediaLoadPromise = (async () => {
     try {
       product.mediaUrls = await readMarketProductMedia(product.id, product.mediaIds);
+      product.mediaUrlFetchedAt = Date.now();
     } catch (error) {
       product.mediaUrls = [];
+      product.mediaUrlFetchedAt = 0;
       console.debug("[Marvel Chat] product media unavailable", error?.code || error?.message);
     } finally {
       product.mediaLoading = false;
+      product.mediaLoadPromise = null;
     }
     return product.mediaUrls;
   })();
   return product.mediaLoadPromise;
 }
 
-async function hydrateSkillListingMedia(item) {
+async function hydrateSkillListingMedia(item, force = false) {
   const listing = item?.result || item;
   if (!listing?.id || !Array.isArray(listing.mediaIds) || !listing.mediaIds.length) return;
-  if (Array.isArray(listing.mediaUrls)) return listing.mediaUrls;
+  const freshForMs = 5 * 60 * 1000;
+  if (force) { listing.mediaUrls = null; listing.mediaLoadPromise = null; listing.mediaUrlFetchedAt = 0; }
+  if (Array.isArray(listing.mediaUrls) && listing.mediaUrls.length && listing.mediaUrlFetchedAt && Date.now() - listing.mediaUrlFetchedAt < freshForMs) return listing.mediaUrls;
   if (listing.mediaLoadPromise) return listing.mediaLoadPromise;
   listing.mediaLoading = true;
   listing.mediaLoadPromise = (async () => {
     try {
       listing.mediaUrls = await readSkillListingMedia(listing.id, listing.mediaIds);
+      listing.mediaUrlFetchedAt = Date.now();
     } catch (error) {
       listing.mediaUrls = [];
+      listing.mediaUrlFetchedAt = 0;
       console.debug("[Marvel Chat] skill media unavailable", error?.code || error?.message);
     } finally {
       listing.mediaLoading = false;
+      listing.mediaLoadPromise = null;
     }
     return listing.mediaUrls;
   })();
@@ -773,6 +854,7 @@ async function hydrateSkillListingMedia(item) {
 }
 
 function resetPendingPhoto(kind) {
+  if (kind === "product" && Array.isArray(state.pendingProductPhotoPreviews)) { state.pendingProductPhotoPreviews.forEach((url) => { if (url) URL.revokeObjectURL(url); }); state.pendingProductPhotoPreviews = []; state.pendingProductPhotoFiles = []; }
   const fileKey = kind === "product" ? "pendingProductPhotoFile" : "pendingSkillPhotoFile";
   const previewKey = kind === "product" ? "pendingProductPhotoPreview" : "pendingSkillPhotoPreview";
   if (state[previewKey]) URL.revokeObjectURL(state[previewKey]);
@@ -780,10 +862,12 @@ function resetPendingPhoto(kind) {
   state[previewKey] = "";
 }
 
-async function loadNotifications() {
+async function loadNotifications(force = false) {
+  if (!force && state.notificationsLoadedAt && Date.now() - state.notificationsLoadedAt < 30_000) return;
   const result = await api.getMyNotificationSummary();
   state.notifications = Array.isArray(result?.notifications) ? result.notifications : [];
   state.unreadNotifications = Number(result?.unreadCount || 0);
+  state.notificationsLoadedAt = Date.now();
 }
 
 function categoryChips(kind, selected) {
@@ -796,7 +880,7 @@ function categoryChips(kind, selected) {
 function momentCard(m, own = false) {
   const label = own ? "Your Moment" : (m.authorSnapshot?.displayName || m.author?.displayName || m.displayName || m.username || "Following");
   const person = own ? (state.profile || state.user || m) : (m.authorSnapshot || m.author || m);
-  return `<button class="moment-card ${own ? "own has-moment" : "has-moment"}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring has-live-moment"><div class="moment-avatar">${avatar(person,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
+  return `<button class="moment-card ${own ? "own has-moment" : "has-moment"}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring"><div class="moment-avatar">${avatar(person,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
 }
 
 function renderPostCard(p) {
@@ -820,7 +904,7 @@ function renderPostCard(p) {
           if (mediaType.startsWith("video/")) {
             return `<figure class="post-carousel-slide" data-slide-index="${index}" data-media-id="${esc(p.mediaIds?.[index] || "")}" role="group" aria-label="${index + 1} of ${mediaCount}"><video src="${esc(m.url)}" controls playsinline preload="none" aria-label="${esc(label)}"></video></figure>`;
           }
-          return `<figure class="post-carousel-slide" data-slide-index="${index}" data-media-id="${esc(p.mediaIds?.[index] || "")}" role="group" aria-label="${index + 1} of ${mediaCount}"><img src="${esc(m.url)}" alt="${esc(label)}" loading="${index === mediaIndex ? "eager" : "lazy"}" fetchpriority="${Number(p.feedIndex) === 0 && index === 0 ? "high" : "auto"}" decoding="async"></figure>`;
+          return `<figure class="post-carousel-slide" data-slide-index="${index}" data-media-id="${esc(p.mediaIds?.[index] || "")}" role="group" aria-label="${index + 1} of ${mediaCount}"><img src="${esc(m.url)}" alt="${esc(label)}" data-post-media="true" data-post-id="${esc(p.id)}" data-media-index="${index}" loading="${index === mediaIndex ? "eager" : "lazy"}" fetchpriority="${Number(p.feedIndex) === 0 && index === 0 ? "high" : "auto"}" decoding="async"></figure>`;
         }).join("")}
       </div>
     </div>
@@ -880,7 +964,7 @@ function renderHome() {
     ? `<div class="feed-loader" role="status">${icon("spinner",18)} Loading more posts…</div>`
     : state.homeHasMore ? `<div id="home-page-sentinel" class="pagination-sentinel"><button class="btn btn-secondary" type="button" data-action="load-more-home">Load more posts</button></div>`
     : state.homeLoaded && state.homeViewerFollowsAny === false
-      ? `<div class="feed-follow-prompt"><strong>You’re caught up with the public posts currently available.</strong><p>Follow people to prioritize their new posts and Moments. You can keep exploring public community updates or search for someone to follow.</p><button class="btn btn-primary" type="button" data-action="route-search">Search people and posts</button></div>`
+      ? `<div class="feed-follow-prompt"><strong>${state.posts.length >= 6 ? "You’ve seen the current public preview." : "You’ve reached the end of the available public posts."}</strong><p>Follow people to see their new posts and Moments. Search for a person or post to find someone to follow.</p><button class="btn btn-primary" type="button" data-action="route-search">Search people and posts</button></div>`
       : state.homeLoaded && state.posts.length ? `<p class="end-of-feed">You’re all caught up.</p>` : "";
   return `<section class="screen home-screen">
     ${renderDiscoveryBanner()}
@@ -906,27 +990,22 @@ function renderChat() {
   if (state.activeThreadId) {
     const t = state.threads.find((x) => x.id === state.activeThreadId) || {};
     const p = peer(t);
-    const visibleMessages = state.messages.filter((m) => {
-      const deletedFor = Array.isArray(m.deletedForUids) && m.deletedForUids.includes(state.user.uid);
-      const senderHidden = m.senderUid === state.user.uid && m.senderDeletedForMe === true;
-      return !deletedFor && !senderHidden;
-    });
-    return `<section class="screen conversation"><header class="conversation-head"><button class="icon-btn" type="button" data-action="close-thread" aria-label="Back">${icon("back")}</button>${avatar(p,"sm",true)}<div class="grow"><strong>${esc(p.displayName || p.username || "Conversation")}</strong><span>${esc(p.username ? `@${p.username}` : "Private conversation")}</span></div><button class="icon-btn" type="button" data-action="thread-menu" data-id="${esc(t.id || state.activeThreadId)}" aria-label="Conversation options">${icon("menuDots",18)}</button></header><div class="messages">${visibleMessages.length ? visibleMessages.map((m) => `<div class="message-row ${m.senderUid === state.user.uid ? "own" : ""}"><div class="bubble"><div>${esc(m.status === "deleted_for_everyone" ? "Message deleted" : (m.text || ""))}</div><small>${when(m.createdAt)}${m.editedAt ? " · edited" : ""}</small>${m.status !== "deleted_for_everyone" && m.type === "user" ? `<button class="message-more" type="button" data-action="message-menu" data-id="${esc(m.id)}">More</button>` : ""}</div></div>`).join("") : emptyState("Start the conversation","Send a message to begin.")}</div><form id="message-form" class="composer"><textarea name="text" rows="1" maxlength="4000" placeholder="Write a message…" required></textarea><button type="submit" aria-label="Send">${icon("send",20)}</button></form></section>`;
+    const visibleMessages = state.messages.filter((m) =>
+      !(Array.isArray(m.deletedForUids) && m.deletedForUids.includes(state.user.uid)) &&
+      !(m.senderUid === state.user.uid && m.senderDeletedForMe === true));
+    return `<section class="screen conversation"><header class="conversation-head"><button class="icon-btn" type="button" data-action="close-thread" aria-label="Back">${icon("back")}</button>${avatar(p,"sm",true)}<div class="grow"><strong>${esc(p.displayName || p.username || "Conversation")}</strong><span>${esc(p.username ? `@${p.username}` : "Private conversation")}</span></div><button class="icon-btn" type="button" data-action="thread-options" data-id="${esc(t.id || state.activeThreadId)}" aria-label="Conversation options">${icon("menuDots",18)}</button></header><div class="messages">${visibleMessages.length ? visibleMessages.map((m) => `<div class="message-row ${m.senderUid === state.user.uid ? "own" : ""}"><div class="bubble"><div>${esc(m.status === "deleted_for_everyone" ? "Message deleted" : (m.text || ""))}</div><small>${when(m.createdAt)}${m.editedAt ? " · edited" : ""}</small>${m.senderUid === state.user.uid && m.status !== "deleted_for_everyone" ? `<div class="message-actions"><button class="message-more" type="button" data-action="edit-message" data-id="${esc(m.id)}">Edit</button><button class="message-more" type="button" data-action="delete-message" data-mode="for_everyone" data-id="${esc(m.id)}">Delete for everyone</button><button class="message-more" type="button" data-action="delete-message" data-mode="for_me" data-id="${esc(m.id)}">Delete for me</button></div>` : m.status !== "deleted_for_everyone" ? `<button class="message-more" type="button" data-action="delete-message" data-mode="for_me" data-id="${esc(m.id)}">Delete for me</button>` : ""}</div></div>`).join("") : emptyState("Start the conversation","Send a message to begin.")}</div><form id="message-form" class="composer"><textarea name="text" rows="1" maxlength="4000" placeholder="Write a message…" required></textarea><button type="submit" aria-label="Send">${icon("send",20)}</button></form></section>`;
   }
-  const visibleThreads = state.threads.filter((t) => {
-    const hidden = Array.isArray(t.hiddenForUids) && t.hiddenForUids.includes(state.user.uid);
-    if (hidden) return false;
-    const archived = Array.isArray(t.archivedUids) && t.archivedUids.includes(state.user.uid);
-    return state.chatFilter === "archived" ? archived : !archived;
+  const uid = String(state.user?.uid || "");
+  const visibleThreads = state.threads.filter((t) =>
+    !(Array.isArray(t.hiddenForUids) && t.hiddenForUids.includes(uid)) &&
+    !(Array.isArray(t.archivedUids) && t.archivedUids.includes(uid)));
+  visibleThreads.sort((a,b) => {
+    const aPinned = Array.isArray(a.pinnedUids) && a.pinnedUids.includes(uid) ? 1 : 0;
+    const bPinned = Array.isArray(b.pinnedUids) && b.pinnedUids.includes(uid) ? 1 : 0;
+    return bPinned - aPinned || stamp(b.updatedAt || b.lastMessageAt) - stamp(a.updatedAt || a.lastMessageAt);
   });
-  const thread = (t) => {
-    const p = peer(t);
-    const pinned = Array.isArray(t.pinnedUids) && t.pinnedUids.includes(state.user.uid);
-    const archived = Array.isArray(t.archivedUids) && t.archivedUids.includes(state.user.uid);
-    const preview = typeof t.lastMessage === "string" ? t.lastMessage : (t.lastMessage?.text || t.lastMessageText || "No messages yet");
-    return `<article class="thread-entry"><button class="thread thread-main" type="button" data-action="open-thread" data-id="${esc(t.id)}">${avatar(p,"md",true)}<span class="thread-copy"><strong>${pinned ? `<span class="thread-pin-mark" aria-label="Pinned">◆ </span>` : ""}${esc(p.displayName || p.username || "Conversation")}</strong><small>${esc(preview)}</small></span><span class="thread-meta">${when(t.lastMessageAt || t.updatedAt)}</span></button><button class="thread-options-button" type="button" data-action="thread-menu" data-id="${esc(t.id)}" aria-label="Conversation options">${icon("menuDots",18)}</button>${state.chatMenuThreadId === t.id ? `<div class="thread-option-panel"><button type="button" data-action="toggle-pin-thread" data-id="${esc(t.id)}">${pinned ? "Unpin" : "Pin"}</button><button type="button" data-action="toggle-archive-thread" data-id="${esc(t.id)}">${archived ? "Unarchive" : "Archive"}</button><button type="button" data-action="hide-thread" data-id="${esc(t.id)}">Delete for me</button></div>` : ""}</article>`;
-  };
-  return `<section class="screen chat-screen">${head("CONVERSATIONS","Chat","Private conversations with people you choose.","focus-chat-search","New chat")}<div class="chat-list-filters" role="group" aria-label="Filter conversations"><button class="category-chip ${state.chatFilter === "all" ? "active" : ""}" type="button" data-action="chat-filter" data-filter="all">All chats</button><button class="category-chip ${state.chatFilter === "archived" ? "active" : ""}" type="button" data-action="chat-filter" data-filter="archived">Archived</button></div>${contextualSearch("chat-person-search-form","Search exact username…","users",state.chatSearchQuery)}${state.chatSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">PEOPLE</span><h2>Search results</h2></div><button class="text-button" type="button" data-action="clear-chat-search">Clear</button></div><div class="results">${state.chatSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}<div class="threads">${visibleThreads.length ? visibleThreads.map(thread).join("") : emptyState(state.chatFilter === "archived" ? "No archived chats" : "No conversations yet",state.chatFilter === "archived" ? "Chats you archive will appear here." : "Search an exact username above to start a conversation.")}</div></section>`;
+  const thread = (t) => { const p = peer(t); const pinned = Array.isArray(t.pinnedUids) && t.pinnedUids.includes(uid); return `<article class="thread-row"><button class="thread" type="button" data-action="open-thread" data-id="${esc(t.id)}">${avatar(p,"md",true)}<span class="thread-copy"><strong>${pinned ? `${icon("star",13)} ` : ""}${esc(p.displayName || p.username || "Conversation")}</strong><small>${esc(typeof t.lastMessage === "string" ? t.lastMessage : (t.lastMessage?.text || t.lastMessageText || "No messages yet"))}</small></span><span class="thread-meta">${when(t.lastMessageAt || t.updatedAt)}</span></button><button class="thread-options-button" type="button" data-action="thread-options" data-id="${esc(t.id)}" aria-label="Conversation options">${icon("menuDots",17)}</button></article>`; };
+  return `<section class="screen chat-screen">${head("CONVERSATIONS","Chat","Private conversations with people you choose.","focus-chat-search","New chat")}${contextualSearch("chat-person-search-form","Search exact username…","users",state.chatSearchQuery)}${state.chatSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">PEOPLE</span><h2>Search results</h2></div><button class="text-button" type="button" data-action="clear-chat-search">Clear</button></div><div class="results">${state.chatSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}<div class="threads">${visibleThreads.length ? visibleThreads.map(thread).join("") : emptyState("No conversations yet","Search an exact username above to start a conversation.")}</div></section>`;
 }
 
 function renderSkills() {
@@ -936,7 +1015,7 @@ function renderSkills() {
     if (!q) return true;
     return [item.title, item.description, item.categoryId, ...(item.tags || [])].join(" ").toLowerCase().includes(q);
   });
-  const card = (item) => { const mediaPending = Array.isArray(item.mediaIds) && item.mediaIds.length && !Array.isArray(item.mediaUrls); return `<article class="listing-card" ${mediaPending ? `data-media-kind="skill" data-media-id="${esc(item.id)}"` : ""}>${item.mediaUrls?.[0]?.url ? `<img class="catalogue-thumb" src="${esc(item.mediaUrls[0].url)}" alt="${esc(item.title || "Service photo")}" loading="lazy" decoding="async">` : `<div class="listing-icon">${icon("skills",20)}</div>`}<div class="grow"><span class="eyebrow">SERVICE</span><h3>${esc(item.title || "Skill listing")}</h3><p>${esc(item.description || "")}</p><div class="tags">${(item.tags || []).slice(0,4).map((tag) => `<span>${esc(tag)}</span>`).join("")}</div><small class="muted">${money(item.priceFromMinor,item.currency || "NGN")}</small></div><button class="btn btn-secondary" type="button" data-action="skill-view" data-id="${esc(item.id)}">View</button></article>`; };
+  const card = (item) => { const mediaPending = Array.isArray(item.mediaIds) && item.mediaIds.length && !Array.isArray(item.mediaUrls); return `<article class="listing-card" ${mediaPending ? `data-media-kind="skill" data-media-id="${esc(item.id)}"` : ""}>${item.mediaUrls?.[0]?.url ? `<img class="catalogue-thumb" src="${esc(item.mediaUrls[0].url)}" alt="${esc(item.title || "Service photo")}" data-media-kind="skill" data-media-id="${esc(item.id)}" loading="lazy" decoding="async">` : `<div class="listing-icon">${icon("skills",20)}</div>`}<div class="grow"><span class="eyebrow">SERVICE</span><h3>${esc(item.title || "Skill listing")}</h3><p>${esc(item.description || "")}</p><div class="tags">${(item.tags || []).slice(0,4).map((tag) => `<span>${esc(tag)}</span>`).join("")}</div><small class="muted">${money(item.priceFromMinor,item.currency || "NGN")}</small></div><button class="btn btn-secondary" type="button" data-action="skill-view" data-id="${esc(item.id)}">View</button></article>`; };
   return `<section class="screen skills-screen">${head("DISCOVERY","Marvel Skills","Discover services and providers.")}${contextualSearch("skills-search-form","Search services or providers…","skills",state.skillsSearchQuery)}<section class="section"><div class="section-head compact"><div><span class="eyebrow">CATEGORIES</span><h2>Explore skills</h2></div>${state.skillProfile ? `<button class="text-button" type="button" data-action="route-skill-profile">My Skills</button>` : ""}</div>${categoryChips("skills",state.skillCategory || "all")}</section><section class="section"><div class="listing-grid">${filtered.length ? filtered.map(card).join("") : emptyState("No services here yet","Try another category or search phrase when new listings are available.")}</div></section></section>`;
 }
 
@@ -944,45 +1023,22 @@ function renderSkillProfile() {
   const p = state.skillProfile;
   const mine = state.skillListingsMine;
   const requests = state.skillRequests.slice(0,12);
-  return `<section class="screen">${head("PROVIDER ACCOUNT","My Skills",p ? "Manage your provider profile and services." : "Create your provider account from Profile.",p ? "create-skill-listing" : "route-skill-onboarding",p ? "Add service" : "Create account", "profile")}<div class="workspace-card featured"><div class="workspace-icon">${icon("skills",22)}</div><div class="grow"><span class="eyebrow">PROVIDER PROFILE</span><h2>${esc(p?.headline || "Provider account")}</h2><p>${esc(p?.bio || "Your provider profile will appear here after setup.")}</p>${p ? `<div class="tags">${(p.categories || []).slice(0,6).map((c) => `<span>${esc(c)}</span>`).join("")}<span>${p.remote ? "Remote" : "On location"}</span></div>` : ""}</div></div>${p ? `<section class="section"><div class="section-head compact"><div><span class="eyebrow">MY SERVICES</span><h2>${mine.length} service${mine.length === 1 ? "" : "s"}</h2></div></div><div class="listing-grid">${mine.length ? mine.map((item) => `<article class="listing-card">${item.mediaUrls?.[0]?.url ? `<img class="catalogue-thumb" src="${esc(item.mediaUrls[0].url)}" alt="${esc(item.title || "Service photo")}" loading="lazy" decoding="async">` : `<div class="listing-icon">${icon("skills",20)}</div>`}<div class="grow"><h3>${esc(item.title || "Service")}</h3><p>${esc(item.description || "")}</p><small class="muted">${esc(item.status || "active")} · ${money(item.priceFromMinor,item.currency || "NGN")}</small></div><div class="stack-buttons"><button class="btn btn-secondary" type="button" data-action="edit-skill-listing" data-id="${esc(item.id)}">Edit</button>${item.status === "active" ? `<button class="btn btn-secondary" type="button" data-action="pause-skill-listing" data-id="${esc(item.id)}">Pause</button>` : item.status === "paused" ? `<button class="btn btn-secondary" type="button" data-action="activate-skill-listing" data-id="${esc(item.id)}">Offer</button>` : ""}<button class="btn btn-secondary" type="button" data-action="delete-skill-listing" data-id="${esc(item.id)}">Delete</button></div></article>`).join("") : emptyState("No services yet","Add your first service to appear in Marvel Skills.","create-skill-listing","Add service")}</div></section><section class="section"><div class="section-head compact"><div><span class="eyebrow">REQUESTS</span><h2>Skill activity</h2></div></div>${requests.length ? requests.map((r) => `<article class="notification"><div class="notification-icon">${icon("skills",18)}</div><div class="grow"><strong>${esc(r.title || "Skill request")}</strong><p>${esc(r.status || "open")}</p><small>${formatDate(r.updatedAt || r.createdAt)}</small></div></article>`).join("") : emptyState("No skill requests","Requests will appear here when members contact your services.")}</section>` : ""}</section>`;
+  return `<section class="screen">${head("PROVIDER ACCOUNT","My Skills",p ? "Manage your provider profile and services." : "Create your provider account from Profile.",p ? "create-skill-listing" : "route-skill-onboarding",p ? "Add service" : "Create account", "profile")}<div class="workspace-card featured"><div class="workspace-icon">${icon("skills",22)}</div><div class="grow"><span class="eyebrow">PROVIDER PROFILE</span><h2>${esc(p?.headline || "Provider account")}</h2><p>${esc(p?.bio || "Your provider profile will appear here after setup.")}</p>${p ? `<div class="tags">${(p.categories || []).slice(0,6).map((c) => `<span>${esc(c)}</span>`).join("")}<span>${p.remote ? "Remote" : "On location"}</span></div>` : ""}</div></div>${p ? `<section class="section"><div class="section-head compact"><div><span class="eyebrow">MY SERVICES</span><h2>${mine.length} service${mine.length === 1 ? "" : "s"}</h2></div></div><div class="listing-grid">${mine.length ? mine.map((item) => `<article class="listing-card">${item.mediaUrls?.[0]?.url ? `<img class="catalogue-thumb" src="${esc(item.mediaUrls[0].url)}" alt="${esc(item.title || "Service photo")}" data-media-kind="skill" data-media-id="${esc(item.id)}" loading="lazy" decoding="async">` : `<div class="listing-icon">${icon("skills",20)}</div>`}<div class="grow"><h3>${esc(item.title || "Service")}</h3><p>${esc(item.description || "")}</p><small class="muted">${esc(item.status || "active")} · ${money(item.priceFromMinor,item.currency || "NGN")}</small></div><div class="stack-buttons"><button class="btn btn-secondary" type="button" data-action="edit-skill-listing" data-id="${esc(item.id)}">Edit</button>${item.status === "active" ? `<button class="btn btn-secondary" type="button" data-action="pause-skill-listing" data-id="${esc(item.id)}">Pause</button>` : item.status === "paused" ? `<button class="btn btn-secondary" type="button" data-action="activate-skill-listing" data-id="${esc(item.id)}">Offer</button>` : ""}<button class="btn btn-secondary" type="button" data-action="delete-skill-listing" data-id="${esc(item.id)}">Delete</button></div></article>`).join("") : emptyState("No services yet","Add your first service to appear in Marvel Skills.","create-skill-listing","Add service")}</div></section><section class="section"><div class="section-head compact"><div><span class="eyebrow">REQUESTS</span><h2>Skill activity</h2></div></div>${requests.length ? requests.map((r) => `<article class="notification"><div class="notification-icon">${icon("skills",18)}</div><div class="grow"><strong>${esc(r.title || "Skill request")}</strong><p>${esc(r.status || "open")}</p><small>${formatDate(r.updatedAt || r.createdAt)}</small></div></article>`).join("") : emptyState("No skill requests","Requests will appear here when members contact your services.")}</section>` : ""}</section>`;
 }
 
 function renderMarket() {
-  const base = state.marketShowSaved ? state.savedMarketProducts : state.products;
-  const queryText = String(state.searchQuery || "").trim().toLowerCase();
-  const stores = (state.marketStores || []).filter((store) => {
-    if (store.status !== "active") return false;
-    const name = String(store.name || store.storeName || "").toLowerCase();
-    const category = String(store.category || "").toLowerCase();
-    const location = String(store.location || store.locationText || "").toLowerCase();
-    return !queryText || name.includes(queryText) || category.includes(queryText) || location.includes(queryText);
-  }).slice(0, 12);
-  const filtered = base.filter((item) => {
-    const p = item.result || item;
-    return categoryMatches(p, state.marketCategory || "all") &&
-      (!state.marketShopFilter || String(p.storeId || p.shopId || "") === String(state.marketShopFilter));
-  });
-  filtered.sort((a, b) => {
-    const ap = a.result || a; const bp = b.result || b;
-    if (state.marketSort === "price-low") return Number(ap.priceMinor || 0) - Number(bp.priceMinor || 0);
-    if (state.marketSort === "price-high") return Number(bp.priceMinor || 0) - Number(ap.priceMinor || 0);
-    return stamp(bp.createdAt || bp.updatedAt) - stamp(ap.createdAt || ap.updatedAt);
-  });
-  const card = (item) => {
-    const p = item.result || item;
-    const image = p.mediaUrls?.[0]?.url;
-    const productId = p.id || item.id || "";
-    const saved = state.savedMarketProductIds.includes(String(productId));
-    const mediaPending = Array.isArray(p.mediaIds) && p.mediaIds.length && !Array.isArray(p.mediaUrls);
-    return `<article class="product-card" ${mediaPending ? `data-media-kind="market" data-media-id="${esc(productId)}"` : ""}><button class="product-card-main" type="button" data-action="market-view" data-id="${esc(productId)}"><div class="product-cover">${image ? `<img src="${esc(image)}" alt="${esc(p.title || "Product photo")}" loading="lazy" decoding="async">` : `<div class="product-cover-icon">${icon("market",24)}</div>`}</div><div class="product-info"><span class="eyebrow">PRODUCT</span><h3>${esc(p.title || item.title || "Product")}</h3><p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong></div></button><button class="market-save-button ${saved ? "is-saved" : ""}" type="button" data-action="toggle-saved-market-product" data-id="${esc(productId)}" aria-pressed="${saved}">${icon("bookmark",16)}${saved ? "Saved" : "Save"}</button></article>`;
-  };
-  const storeCards = stores.map((store) => {
-    const active = String(state.marketShopFilter || "") === String(store.id);
-    const storeName = store.name || store.storeName || "Store";
-    const initialsText = storeName.trim().split(/\s+/).slice(0, 2).map((x) => x[0] || "").join("").toUpperCase();
-    return `<button class="market-shop-card ${active ? "active" : ""}" type="button" data-action="market-filter-shop" data-id="${esc(store.id)}" aria-pressed="${active}"><span class="market-shop-mark">${esc(initialsText || "S")}</span><span class="market-shop-copy"><strong>${esc(storeName)}</strong><small>${esc(store.category || "Community store")}${store.location || store.locationText ? ` · ${esc(store.location || store.locationText)}` : ""}</small><em>View products ↗</em></span></button>`;
-  }).join("");
-  return `<section class="screen market-screen">${head("DISCOVERY","Marvel Market","Discover products and shops from the community.",state.myStore ? "route-business" : "",state.myStore ? "My Shop" : "")}${contextualSearch("market-form","Search products and shops…","market",state.searchQuery)}<div class="market-powered">Powered by Davonium Technologies</div><section class="section market-shops-section"><div class="section-head compact"><div><span class="eyebrow">STOREFRONTS</span><h2>Explore shops</h2></div>${state.marketShopFilter ? `<button class="text-button" type="button" data-action="market-clear-shop">Clear filter</button>` : ""}</div>${storeCards ? `<div class="market-shop-grid">${storeCards}</div>` : `<p class="muted market-small-note">Active shops will appear here as sellers publish their storefronts.</p>`}</section><section class="section"><div class="section-head compact"><div><span class="eyebrow">CATEGORIES</span><h2>Browse categories</h2></div></div>${categoryChips("market",state.marketCategory || "all")}</section><section class="market-tool-row"><button class="category-chip ${state.marketShowSaved ? "active" : ""}" type="button" data-action="toggle-market-saved-view">${icon("bookmark",15)} Saved products</button><label class="market-sort-label">Sort <select data-action="market-sort" aria-label="Sort products"><option value="newest" ${state.marketSort === "newest" ? "selected" : ""}>Recommended / newest</option><option value="price-low" ${state.marketSort === "price-low" ? "selected" : ""}>Price: low to high</option><option value="price-high" ${state.marketSort === "price-high" ? "selected" : ""}>Price: high to low</option></select></label></section><section class="section"><div class="section-head compact"><div><span class="eyebrow">${state.marketShowSaved ? "YOUR COLLECTION" : state.marketShopFilter ? "SELECTED SHOP" : "CATALOGUE"}</span><h2>${state.marketShopFilter ? esc(stores.find((s) => String(s.id) === String(state.marketShopFilter))?.name || "Shop products") : state.marketShowSaved ? "Saved products" : "Products"}</h2></div></div><div class="product-grid">${filtered.length ? filtered.map(card).join("") : emptyState(state.marketShowSaved ? "No saved products yet" : state.marketShopFilter ? "No active products from this shop yet" : "Nothing to show yet",state.marketShowSaved ? "Save a product to keep it here for later." : "Try another category or search phrase, or explore an active shop above.")}</div></section></section>`;
+  let filtered = state.products.filter((item) => categoryMatches(item, state.marketCategory || "all"));
+  const query = String(state.searchQuery || "").trim().toLowerCase();
+  if (query) filtered = filtered.filter((p) => [p.title,p.description,p.storeName,p.categoryId,...(p.tags || [])].join(" ").toLowerCase().includes(query));
+  const score = (item) => Number(item.marketScore ?? item.score ?? 0);
+  if (state.marketSort === "price_low") filtered.sort((a,b) => Number(a.priceMinor || 0) - Number(b.priceMinor || 0));
+  else if (state.marketSort === "price_high") filtered.sort((a,b) => Number(b.priceMinor || 0) - Number(a.priceMinor || 0));
+  else if (state.marketSort === "newest") filtered.sort((a,b) => stamp(b.createdAt) - stamp(a.createdAt));
+  else filtered.sort((a,b) => score(b) - score(a));
+  const shopCard = (shop) => `<button type="button" class="market-shop-card" data-action="market-view-shop" data-id="${esc(shop.id)}"><span class="market-shop-avatar">${icon("shop",20)}</span><span class="market-shop-copy"><strong>${esc(shop.name || "Shop")}</strong><small>${esc(shop.category || "Independent shop")}${shop.locationText || shop.location ? ` · ${esc(shop.locationText || shop.location)}` : ""}</small></span><span class="market-shop-arrow">${icon("arrow",16)}</span></button>`;
+  const card = (p) => { const image = p.mediaUrls?.[0]?.url; const productId = p.id || p.productId || ""; const mediaPending = Array.isArray(p.mediaIds) && p.mediaIds.length && !Array.isArray(p.mediaUrls); const saved = state.marketSavedProductIds.includes(String(productId)); return `<article class="product-card" ${mediaPending ? `data-media-kind="market" data-media-id="${esc(productId)}"` : ""}><button class="product-card-main" type="button" data-action="market-view" data-id="${esc(productId)}"><div class="product-cover">${image ? `<img src="${esc(image)}" alt="${esc(p.title || "Product photo")}" data-media-kind="market" data-media-id="${esc(productId)}" loading="lazy" decoding="async">` : `<div class="product-cover-icon">${icon("market",24)}</div>`}</div><div class="product-info"><span class="eyebrow">PRODUCT</span><h3>${esc(p.title || "Product")}</h3><p>${esc(p.description || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong></div></button><div class="product-card-foot"><button type="button" class="product-shop-link" data-action="market-view-shop" data-id="${esc(p.storeId || "")}">${icon("shop",14)} ${esc(p.storeName || "View shop")}</button><button type="button" class="product-save-button ${saved ? "is-saved" : ""}" data-action="save-market-product" data-id="${esc(productId)}" data-saved="${saved}" aria-pressed="${saved}">${icon("bookmark",15)}</button></div></article>`; };
+  const shops = state.marketStores.slice(0, 12);
+  return `<section class="screen market-screen">${head("DISCOVERY","Marvel Market","Explore independent shops and the products they offer.",state.myStore ? "route-business" : "route-seller-onboarding",state.myStore ? "My Shop" : "Open a shop")}${contextualSearch("market-form","Search products and shops…","market",state.searchQuery)}<section class="section"><div class="section-head compact"><div><span class="eyebrow">CATEGORIES</span><h2>Browse categories</h2></div></div>${categoryChips("market",state.marketCategory || "all")}</section><section class="section"><div class="section-head compact"><div><span class="eyebrow">STOREFRONTS</span><h2>Explore shops</h2></div></div><div class="market-shop-grid">${shops.length ? shops.map(shopCard).join("") : `<p class="muted">New shops will appear here as sellers open their storefronts.</p>`}</div></section><section class="section"><div class="section-head compact"><div><span class="eyebrow">PRODUCTS</span><h2>${query ? "Search results" : "Discover products"}</h2></div><label class="market-sort"><span>Sort</span><select data-action="market-sort" aria-label="Sort products"><option value="recommended" ${state.marketSort === "recommended" ? "selected" : ""}>Recommended</option><option value="newest" ${state.marketSort === "newest" ? "selected" : ""}>Newest</option><option value="price_low" ${state.marketSort === "price_low" ? "selected" : ""}>Price: low to high</option><option value="price_high" ${state.marketSort === "price_high" ? "selected" : ""}>Price: high to low</option></select></label><button type="button" class="btn btn-secondary" data-action="show-saved-market">${icon("bookmark",15)} Saved</button></div><div class="product-grid">${filtered.length ? filtered.map(card).join("") : emptyState("Nothing to show yet","Try another category or search phrase.")}</div></section></section>`;
 }
 
 function renderBusiness() {
@@ -1027,18 +1083,16 @@ function renderProfile() {
   const posts = state.followStats.postCount ?? p.postsCount ?? p.postCount ?? 0;
   const followers = state.followStats.followersCount ?? p.followersCount ?? 0;
   const following = state.followStats.followingCount ?? p.followingCount ?? state.followingIds.length ?? 0;
-  return `<section class="screen">${head("YOUR SPACE","Profile","Your identity, provider account, seller account, and settings.","edit-profile","Edit profile")}<div class="profile-hero">${avatar(p,"xl",true)}<div class="profile-main"><h1>${esc(p.displayName || state.user?.displayName || "Your profile")}</h1><p class="handle">${esc(p.username ? `@${p.username}` : p.email || state.user?.email || "")}</p><p class="bio">${esc(p.bio || "")}</p></div></div><div class="profile-stats"><div class="profile-stat" aria-label="Your post count"><strong>${esc(posts)}</strong><span>Posts</span></div><button class="profile-stat" type="button" data-action="profile-follow-list" data-direction="followers"><strong>${esc(followers)}</strong><span>Followers</span></button><button class="profile-stat" type="button" data-action="profile-follow-list" data-direction="following"><strong>${esc(following)}</strong><span>Following</span></button></div><div class="profile-grid"><button class="profile-tile" type="button" data-action="route-skill-profile"><span class="tile-icon">${icon("skills",20)}</span><strong>${state.skillProfile ? "My Skills" : "Create skill account"}</strong><small>${state.skillProfile ? "Manage your provider profile and services." : "Become a provider from your Profile."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-business"><span class="tile-icon">${icon("shop",20)}</span><strong>${state.myStore ? "My Shop" : "Create seller account"}</strong><small>${state.myStore ? "Manage your storefront, products, stock, and orders." : "Create a seller account before opening your shop."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-settings"><span class="tile-icon">${icon("settings",20)}</span><strong>Settings</strong><small>Appearance and notification preferences.</small>${icon("arrow",17)}</button></div><div class="profile-footer-actions"><button class="btn btn-secondary" type="button" data-action="sign-out">${icon("logout",17)}Sign out</button></div></section>`;
+  return `<section class="screen">${head("YOUR SPACE","Profile","Your identity, provider account, seller account, and settings.","edit-profile","Edit profile")}<div class="profile-hero">${avatar(p,"xl",true)}<div class="profile-main"><h1>${esc(p.displayName || state.user?.displayName || "Your profile")}</h1><p class="handle">${esc(p.username ? `@${p.username}` : p.email || state.user?.email || "")}</p><p class="bio">${esc(p.bio || "")}</p></div></div><div class="profile-stats"><button type="button" data-action="profile-posts"><strong>${esc(posts)}</strong><span>Posts</span></button><button type="button" data-action="profile-followers"><strong>${esc(followers)}</strong><span>Followers</span></button><button type="button" data-action="profile-following"><strong>${esc(following)}</strong><span>Following</span></button></div><div class="profile-grid"><button class="profile-tile" type="button" data-action="route-skill-profile"><span class="tile-icon">${icon("skills",20)}</span><strong>${state.skillProfile ? "My Skills" : "Create skill account"}</strong><small>${state.skillProfile ? "Manage your provider profile and services." : "Become a provider from your Profile."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-business"><span class="tile-icon">${icon("shop",20)}</span><strong>${state.myStore ? "My Shop" : "Create seller account"}</strong><small>${state.myStore ? "Manage your storefront, products, stock, and orders." : "Create a seller account before opening your shop."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-settings"><span class="tile-icon">${icon("settings",20)}</span><strong>Settings</strong><small>Appearance and notification preferences.</small>${icon("arrow",17)}</button></div><div class="profile-footer-actions"><button class="btn btn-secondary" type="button" data-action="sign-out">${icon("logout",17)}Sign out</button></div></section>`;
 }
 
 function renderSearch() {
   const results = state.searchResults.slice(0,24);
-  const scope = state.searchScope === "users" ? "users" : "people_posts";
-  return `<section class="screen">${head("DISCOVERY","Search","Find people and public posts.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search people and posts…" autocomplete="off"></label><select name="scope" aria-label="Search scope"><option value="people_posts" ${scope === "people_posts" ? "selected" : ""}>People and posts</option><option value="users" ${scope === "users" ? "selected" : ""}>People only</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching","Search a name, username, or words from a public post.")}</div></section>`;
+  return `<section class="screen">${head("DISCOVERY","Search","Find people, skills, products, and shops.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search everything…" autocomplete="off"></label><select name="scope"><option value="all" ${state.searchScope === "all" ? "selected" : ""}>Everything</option><option value="users" ${state.searchScope === "users" ? "selected" : ""}>People</option><option value="skills" ${state.searchScope === "skills" ? "selected" : ""}>Skills</option><option value="market" ${state.searchScope === "market" ? "selected" : ""}>Market</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching","Search by name, username, skill, product, or shop.")}</div></section>`;
 }
 function renderNotifications() { return `<section class="screen">${head("UPDATES","Notifications",state.unreadNotifications ? `${state.unreadNotifications} unread` : "You are all caught up.", "", "", "home")}<div>${state.notifications.length ? state.notifications.map((n) => `<article class="notification ${n.read || n.isRead || n.readAt ? "" : "unread"}"><div class="notification-icon">${icon("bell",18)}</div><div class="grow"><strong>${esc(n.title || "Marvel Chat")}</strong><p>${esc(n.body || "")}</p><small>${when(n.createdAt)}</small></div>${!(n.read || n.isRead || n.readAt) ? `<button class="text-button" type="button" data-action="read-notification" data-id="${esc(n.id)}">Mark read</button>` : ""}</article>`).join("") : emptyState("No new notifications","Activity updates will appear here.")}</div></section>`; }
-
 function renderHelp() {
-  return `<section class="screen help-screen">${head("HELP CENTER","How to use Marvel Chat","A quick guide to the main features and getting support.","feedback","Contact support","home")}<div class="help-grid"><article class="help-card"><span class="tile-icon">${icon("home",20)}</span><h2>Home and Moments</h2><p>Browse public posts, follow people to personalize your feed, use Load more for the next page, and publish photo or text updates within your media quota.</p></article><article class="help-card"><span class="tile-icon">${icon("chat",20)}</span><h2>Chats</h2><p>Open a conversation from a person’s profile or search results. Use the chat menu to pin, archive or hide a conversation when those controls are available.</p></article><article class="help-card"><span class="tile-icon">${icon("skills",20)}</span><h2>Marvel Skills</h2><p>Browse services, open a provider profile, and send a request. Providers can manage active services from My Skills.</p></article><article class="help-card"><span class="tile-icon">${icon("shop",20)}</span><h2>Marvel Market</h2><p>Explore active shops, search products, save items for later, and contact sellers through commerce requests. Payments are not collected in the app yet.</p></article><article class="help-card"><span class="tile-icon">${icon("profile",20)}</span><h2>Profile and privacy</h2><p>Manage your name, username, photo, followers, preferences and notification permissions from Profile and Settings.</p></article><article class="help-card"><span class="tile-icon">${icon("bell",20)}</span><h2>Notifications and installation</h2><p>Enable browser notifications from Settings after signing in. Installation is optional and offered only where supported by your browser.</p></article></div><section class="help-contact"><div><span class="eyebrow">NEED MORE HELP?</span><h2>Davonium Technologies Support</h2><p>For account or safety concerns, contact the company team.</p></div><div class="stack-buttons"><a class="btn btn-primary" href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">Contact support</a><a class="btn btn-secondary" href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">Company website</a></div></section></section>`;
+  return `<section class="screen help-screen">${head("HELP CENTRE","How to use Marvel Chat","A quick guide to getting value from each section.","route-home","Back to Home")}<div class="help-guide-grid"><article class="help-guide-card"><span class="help-guide-icon">${icon("home",22)}</span><h2>Home and Moments</h2><p>Browse community posts, swipe through post photos and videos, expand captions, like, comment, save, and follow people. Select Create to publish a post or a temporary Moment.</p></article><article class="help-guide-card"><span class="help-guide-icon">${icon("chat",22)}</span><h2>Chat</h2><p>Search for a person by username, open a conversation, and send a message. Use conversation options to keep important chats organized. Enable browser notifications in Settings if you want alerts outside the app.</p></article><article class="help-guide-card"><span class="help-guide-icon">${icon("skills",22)}</span><h2>Marvel Skills</h2><p>Create a provider profile to publish services. Add a clear service photo, accurate description, category and price. Manage a service from My Skills; deletion removes it from public discovery, while request history may be retained when needed.</p></article><article class="help-guide-card"><span class="help-guide-icon">${icon("market",22)}</span><h2>Marvel Market</h2><p>Browse categories, open a shop to view its available products, and save items for later. Sellers can create a shop from Profile, then add product details, price, stock and product photos.</p></article><article class="help-guide-card"><span class="help-guide-icon">${icon("profile",22)}</span><h2>Profile and Settings</h2><p>Keep your name, username, profile photo and bio up to date. Your posts, follower list and following list are available from Profile. Settings controls appearance and notification permission.</p></article><article class="help-guide-card"><span class="help-guide-icon">${icon("shield",22)}</span><h2>Privacy and media</h2><p>Choose post visibility carefully and share only content you have permission to upload. Image compression shows the resulting file size. The shared media allowance is 2 MiB over a rolling 24-hour period.</p></article></div><div class="help-support-card"><div><strong>Need help?</strong><p>Contact Davonium Technologies for support and product feedback.</p></div><a class="btn btn-primary" href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">Contact support</a></div></section>`;
 }
 
 function renderSettings() {
@@ -1055,10 +1109,6 @@ function getBrowserDeviceIds() {
 }
 
 let foregroundMessageUnsubscribe = null;
-function readPushPreference(uid = state.user?.uid) {
-  if (!uid || typeof Notification === "undefined" || Notification.permission !== "granted") return false;
-  try { return localStorage.getItem(`marvel-push-enabled.${uid}`) === "1"; } catch { return false; }
-}
 
 async function enableBrowserNotifications() {
   if (!("Notification" in window)) { toast("Notifications are not supported in this browser.","error"); return; }
@@ -1070,7 +1120,6 @@ async function enableBrowserNotifications() {
     const {deviceId, installationId} = getBrowserDeviceIds();
     await api.registerDevice({deviceId, installationId, token, platform:"web", browser:navigator.userAgent.slice(0,120)});
     await api.updateUserSettings({notificationPreferences:{pushEnabled:true}});
-    try { localStorage.setItem(`marvel-push-enabled.${state.user.uid}`, "1"); } catch {}
     state.pushEnabled = true;
     if (foregroundMessageUnsubscribe) foregroundMessageUnsubscribe();
     foregroundMessageUnsubscribe = onForegroundMessage((payload) => {
@@ -1092,7 +1141,6 @@ async function disableBrowserNotifications() {
     const {deviceId} = getBrowserDeviceIds();
     await api.unregisterDevice({deviceId});
     await api.updateUserSettings({notificationPreferences:{pushEnabled:false}});
-    try { localStorage.removeItem(`marvel-push-enabled.${state.user.uid}`); } catch {}
     state.pushEnabled = false;
     if (foregroundMessageUnsubscribe) { foregroundMessageUnsubscribe(); foregroundMessageUnsubscribe = null; }
     toast("Notifications disabled for this browser.","success");
@@ -1155,8 +1203,7 @@ async function legalBody(type) {
   }[type];
   const legalLinks = [["terms","Terms of Use"],["privacy","Privacy Policy"],["community","Community Guidelines"]];
   const switcher = `<nav class="legal-modal-switcher" aria-label="Switch legal page">${legalLinks.map(([key,label]) => `<button type="button" class="${key === type ? "active" : ""}" data-action="legal-${key}" ${key === type ? 'aria-current="page"' : ""}>${label}</button>`).join("")}</nav>`;
-  const corporateNav = `<nav class="legal-corporate-nav" aria-label="Davonium Technologies policies"><a href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">Company</a><a href="https://www.davoniumtech.com/legal/terms" target="_blank" rel="noopener noreferrer">Company Terms</a><a href="https://www.davoniumtech.com/legal/privacy" target="_blank" rel="noopener noreferrer">Company Privacy</a><a href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">Contact</a></nav>`;
-  const hero = `<section class="legal-modal-hero"><div class="legal-modal-mark"><img src="./assets/brand/icon-192.png" width="56" height="56" alt="Marvel Chat"></div><div class="legal-modal-hero-copy"><span class="eyebrow">OFFICIAL POLICY · DAVONIUM TECHNOLOGIES</span><h3>${esc({terms:"Terms of Use",privacy:"Privacy Policy",community:"Community Guidelines"}[type])}</h3><p>${esc(summary)}</p></div>${switcher}${corporateNav}</section>`;
+  const hero = `<section class="legal-modal-hero"><div class="legal-modal-mark"><img src="./assets/brand/icon-192.png" width="56" height="56" alt="Marvel Chat"></div><div class="legal-modal-hero-copy"><span class="eyebrow">OFFICIAL POLICY · DAVONIUM TECHNOLOGIES</span><h3>${esc({terms:"Terms of Use",privacy:"Privacy Policy",community:"Community Guidelines"}[type])}</h3><p>${esc(summary)}</p></div>${switcher}</section>`;
   return `${hero}<div class="legal-modal-document">${main.innerHTML}</div>`;
 }
 
@@ -1195,7 +1242,8 @@ function openLegal(type) {
 const viewMap = {
   home: renderHome, chat: renderChat, skills: renderSkills, market: renderMarket,
   profile: renderProfile, search: renderSearch, "saved-posts": renderSavedPosts, notifications: renderNotifications,
-  settings: renderSettings, help: renderHelp, "skill-profile": renderSkillProfile,
+  settings: renderSettings,
+  help: renderHelp, "skill-profile": renderSkillProfile,
   business: renderBusiness, "seller-onboarding": renderSellerOnboarding,
   "skill-onboarding": renderSkillOnboarding
 };
@@ -1220,7 +1268,7 @@ function bindCatalogueMedia() {
       const kind = entry.target.dataset.mediaKind;
       const id = entry.target.dataset.mediaId;
       let item = null;
-      if (kind === "market") item = [...state.products, ...state.savedMarketProducts].find((candidate) => candidate.id === id || candidate.result?.id === id);
+      if (kind === "market") item = state.products.find((candidate) => candidate.id === id || candidate.result?.id === id);
       if (kind === "skill") item = state.skills.find((candidate) => candidate.id === id);
       if (!item) continue;
       const routeAtStart = state.route;
@@ -1240,26 +1288,27 @@ function paint() {
     app.innerHTML = authScreen();
     return;
   }
-  // Preserve a whole slide index through re-renders.
+  // Capture the actual scroll offset before replacing the feed DOM. Keeping a
+  // pixel ratio (not merely the rounded slide number) avoids snapping a user's
+  // finger back to slide one when a signed URL finishes loading mid-swipe.
   const carouselOffsets = new Map();
   app.querySelectorAll("[data-post-carousel-track]").forEach((track) => {
     if (!track.dataset.id || !track.clientWidth) return;
-    const index = Math.max(0, Math.round(track.scrollLeft / track.clientWidth));
-    carouselOffsets.set(String(track.dataset.id), index);
+    const ratio = track.scrollLeft / track.clientWidth;
+    carouselOffsets.set(String(track.dataset.id), ratio);
     const post = [...state.posts, ...state.savedPosts].find((item) => String(item.id) === String(track.dataset.id));
-    if (post) post.mediaIndex = Math.max(0, Math.min((post.mediaIds || []).length - 1, index));
+    if (post) post.mediaIndex = Math.max(0, Math.min((post.mediaIds || []).length - 1, Math.round(ratio)));
   });
   app.innerHTML = shell((viewMap[state.route] || renderHome)(), state.route === "chat" && Boolean(state.activeThreadId));
   bindHomePagination();
   bindCatalogueMedia();
   app.querySelectorAll("[data-post-carousel-track]").forEach((track) => {
-    const savedIndex = carouselOffsets.get(String(track.dataset.id));
+    const savedRatio = carouselOffsets.get(String(track.dataset.id));
     const fallbackIndex = Math.max(0, Number(track.dataset.startIndex || 0));
-    const index = Number.isFinite(savedIndex) ? savedIndex : fallbackIndex;
+    const ratio = Number.isFinite(savedRatio) ? savedRatio : fallbackIndex;
     requestAnimationFrame(() => {
       if (!track.isConnected || !track.clientWidth) return;
-      track.scrollLeft = Math.max(0, index * track.clientWidth);
-      track.dataset.currentIndex = String(index);
+      track.scrollLeft = Math.max(0, ratio * track.clientWidth);
     });
   });
   syncDiscoveryBannerTimer();
@@ -1308,7 +1357,7 @@ async function signup(form) {
 function openCreatePost() {
   state.pendingMediaFile = null;
   state.pendingMediaFiles = [];
-  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field"><textarea id="post-text" name="text" maxlength="5000" placeholder=" "></textarea><span>What would you like to share?</span></label>${postFormatToolbar("post-text")}<label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><div class="upload-action-row post-upload-row"><button class="btn btn-secondary" type="button" data-action="pick-post-media">${icon("camera",18)}Choose photos or videos from gallery</button><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Up to 10 items. Each item must be 2 MiB or smaller after compression; shared daily limit is 2 MiB. Compression results show the exact KB saved.</small></div><div id="post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
+  modal("Create post",`<form id="post-form" class="form-stack compact-form"><label class="floating-field rich-text-field"><div id="post-text-editor" class="rich-text-editor" data-post-editor contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="What would you like to share?"></div><textarea id="post-text" name="text" maxlength="5000" hidden></textarea><span>What would you like to share?</span></label>${postFormatToolbar("post-text-editor")}<label class="select-field"><span>Visibility</span><select name="visibility"><option value="public">Public</option><option value="followers">Followers</option><option value="private">Private</option></select></label><div class="upload-action-row post-upload-row"><button class="btn btn-secondary" type="button" data-action="pick-post-media">${icon("camera",18)}Choose photos or videos from gallery</button><input id="post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Up to 10 items. Each item must be 2 MiB or smaller after compression; shared daily limit is 2 MiB. Compression results show the exact KB saved.</small></div><div id="post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-post">Publish</button>`,{wide:true});
 }
 
 async function openPostEditor(post) {
@@ -1327,7 +1376,7 @@ async function openPostEditor(post) {
       : `<span>Media ${index + 1}</span>`;
     return `<label class="edit-media-item"><input type="checkbox" name="keepMediaIds" value="${esc(mediaId)}" checked><span class="edit-media-thumb">${preview}</span><span>Keep media ${index + 1}</span></label>`;
   }).join("") : `<p class="muted">This post has no existing media.</p>`;
-  modal("Edit post",`<form id="edit-post-form" class="form-stack compact-form"><input type="hidden" name="postId" value="${esc(post.id)}"><label class="floating-field"><textarea id="edit-post-text" name="text" maxlength="5000" placeholder=" ">${esc(post.text || "")}</textarea><span>Post text</span></label>${postFormatToolbar("edit-post-text")}<label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${post.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${post.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${post.visibility === "private" ? "selected" : ""}>Private</option></select></label><section class="edit-existing-media"><strong>Existing photos and videos</strong><small>Untick an item to remove it from this post.</small><div class="edit-existing-media-grid">${keepMediaMarkup}</div></section><div class="upload-action-row"><button class="btn btn-secondary" type="button" data-action="pick-edit-post-media">${icon("camera",18)}Add photos or videos</button><input id="edit-post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Add up to 10 media items total. Images are compressed before upload.</small></div><div id="edit-post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post" data-id="${esc(post.id)}">Save changes</button>`,{wide:true});
+  modal("Edit post",`<form id="edit-post-form" class="form-stack compact-form"><input type="hidden" name="postId" value="${esc(post.id)}"><label class="floating-field rich-text-field"><div id="edit-post-text-editor" class="rich-text-editor" data-post-editor contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Post text">${markdownToRichEditor(post.text || "")}</div><textarea id="edit-post-text" name="text" maxlength="5000" hidden></textarea><span>Post text</span></label>${postFormatToolbar("edit-post-text-editor")}<label class="select-field"><span>Visibility</span><select name="visibility"><option value="public" ${post.visibility === "public" ? "selected" : ""}>Public</option><option value="followers" ${post.visibility === "followers" ? "selected" : ""}>Followers</option><option value="private" ${post.visibility === "private" ? "selected" : ""}>Private</option></select></label><section class="edit-existing-media"><strong>Existing photos and videos</strong><small>Untick an item to remove it from this post.</small><div class="edit-existing-media-grid">${keepMediaMarkup}</div></section><div class="upload-action-row"><button class="btn btn-secondary" type="button" data-action="pick-edit-post-media">${icon("camera",18)}Add photos or videos</button><input id="edit-post-media" type="file" accept="image/jpeg,image/png,image/webp,image/gif,video/mp4,video/webm,video/quicktime" multiple hidden><small>Add up to 10 media items total. Images are compressed before upload.</small></div><div id="edit-post-media-preview" class="post-media-picker" aria-live="polite"></div></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-post" data-id="${esc(post.id)}">Save changes</button>`,{wide:true});
 }
 
 function openCreateMoment() {
@@ -1396,14 +1445,42 @@ function openFeedback() {
 
 function openSkillListing(listing) {
   const price = listing.priceFromMinor == null ? "Price on request" : money(listing.priceFromMinor,listing.currency || "NGN");
-  const serviceImage = listing.mediaUrls?.[0]?.url ? `<img class="product-detail-photo" src="${esc(listing.mediaUrls[0].url)}" alt="${esc(listing.title || "Service photo")}" decoding="async">` : "";
+  const serviceImage = listing.mediaUrls?.[0]?.url ? `<img class="product-detail-photo" src="${esc(listing.mediaUrls[0].url)}" alt="${esc(listing.title || "Service photo")}" data-media-kind="skill" data-media-id="${esc(listing.id)}" data-media-index="0" decoding="async">` : "";
   modal(listing.title || "Service",`<div class="detail">${serviceImage}<p>${esc(listing.description || "")}</p><div class="tags">${(listing.tags || []).map((t) => `<span>${esc(t)}</span>`).join("")}</div><strong>${price}</strong></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-primary" type="button" data-action="request-skill" data-id="${esc(listing.id)}">Request service</button>`,{wide:true});
+}
+
+async function openMarketShop(storeId) {
+  if (!storeId) { toast("This shop is unavailable.", "error"); return; }
+  let store = state.marketStores.find((item) => String(item.id) === String(storeId));
+  if (!store) {
+    try {
+      const snap = await getDoc(doc(db, "stores", storeId));
+      if (snap.exists()) store = {id:snap.id, ...snap.data()};
+    } catch (error) {
+      console.debug("[Marvel Chat] shop details unavailable", error?.code);
+    }
+  }
+  if (!store || store.status !== "active") {
+    toast("This shop is not currently available.", "error");
+    return;
+  }
+  const response = await api.discoverMarketProducts({query:"", storeId, limit:24});
+  const products = (Array.isArray(response?.results) ? response.results : [])
+    .map((item) => ({...item, id:item.id || item.productId || "", storeName:store.name || "Shop"}))
+    .filter((item) => item.id);
+  await Promise.all(products.slice(0, 6).map((item) => hydrateMarketProductMedia(item)));
+  const cards = products.length ? products.map((p) => `<button type="button" class="shop-product-card" data-action="market-view" data-id="${esc(p.id)}"><span class="shop-product-photo">${p.mediaUrls?.[0]?.url ? `<img src="${esc(p.mediaUrls[0].url)}" alt="${esc(p.title || "Product photo")}" loading="lazy" decoding="async">` : icon("market",20)}</span><span class="shop-product-copy"><strong>${esc(p.title || "Product")}</strong><small>${money(p.priceMinor,p.currency || "NGN")}</small></span></button>`).join("") : `<div class="empty-state"><strong>No available products yet</strong><span>This shop has not published an available product.</span></div>`;
+  modal(store.name || "Shop", `<div class="shop-detail-head"><span class="shop-detail-mark">${icon("shop",22)}</span><div><h3>${esc(store.name || "Shop")}</h3><p>${esc(store.description || "Explore available items from this shop.")}</p><small>${esc(store.locationText || store.location || "")}</small></div></div><div class="shop-products-grid">${cards}</div>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button>`, {wide:true});
 }
 
 function openMarketProduct(item) {
   const p = item.result || item;
-  const productImage = p.mediaUrls?.[0]?.url ? `<img class="product-detail-photo" src="${esc(p.mediaUrls[0].url)}" alt="${esc(p.title || "Product photo")}" decoding="async">` : `<div class="product-detail-icon">${icon("market",30)}</div>`;
-  modal(p.title || "Product",`<div class="detail">${productImage}<p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong><small class="muted">${esc(p.status || "available")}</small></div><form id="purchase-form" class="form-stack compact-form"><input type="hidden" name="productId" value="${esc(p.id || item.id || "")}"><input type="hidden" name="storeId" value="${esc(p.storeId || "")}"><label class="floating-field"><input name="quantity" type="number" min="1" max="1000" value="1" required><span>Quantity</span></label><label class="floating-field"><textarea name="customerNote" maxlength="1000" placeholder=" "></textarea><span>Note to seller (optional)</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-primary" type="button" data-action="submit-purchase">Send request</button>`,{wide:true});
+  if (!p.id && p.productId) p.id = p.productId;
+  const media = Array.isArray(p.mediaUrls) ? p.mediaUrls.filter((m) => m?.url).slice(0, 8) : [];
+  const photos = media.length ? `<div class="market-detail-carousel" aria-label="Product photos and videos"><div class="market-detail-track" tabindex="0" data-market-detail-track>${media.map((m, index) => `<figure class="market-detail-slide" aria-label="${index + 1} of ${media.length}">${String(m.contentType || "").startsWith("video/") ? `<video src="${esc(m.url)}" controls playsinline preload="metadata" aria-label="${esc(p.title || "Product")} video ${index + 1}"></video>` : `<img src="${esc(m.url)}" alt="${esc(p.title || "Product photo")} ${index + 1}" data-media-kind="market" data-media-id="${esc(p.id)}" data-media-index="${index}" loading="${index ? "lazy" : "eager"}" decoding="async">`}</figure>`).join("")}</div>${media.length > 1 ? `<div class="market-detail-carousel-controls"><button type="button" data-action="market-media-prev" aria-label="Previous product photo">‹</button><span data-market-detail-count>1 / ${media.length}</span><button type="button" data-action="market-media-next" aria-label="Next product photo">›</button></div>` : ""}</div>` : `<div class="product-detail-icon">${icon("market",30)}</div>`;
+  const store = state.marketStores.find((s) => String(s.id) === String(p.storeId)) || {id:p.storeId, name:p.storeName || "Shop"};
+  const saved = state.marketSavedProductIds.includes(String(p.id || item.id || ""));
+  modal(p.title || "Product",`<div class="detail">${photos}<button type="button" class="market-store-link" data-action="market-view-shop" data-id="${esc(store.id || "")}">${icon("shop",16)} From ${esc(store.name || "Shop")} · View shop</button><p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong><small class="muted">${esc(p.status || "available")}</small></div><form id="purchase-form" class="form-stack compact-form"><input type="hidden" name="productId" value="${esc(p.id || item.id || "")}"><input type="hidden" name="storeId" value="${esc(p.storeId || "")}"><label class="floating-field"><input name="quantity" type="number" min="1" max="1000" value="1" required><span>Quantity</span></label><label class="floating-field"><textarea name="customerNote" maxlength="1000" placeholder=" "></textarea><span>Note to seller (optional)</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button><button class="btn btn-secondary" type="button" data-action="save-market-product" data-id="${esc(p.id || item.id || "")}" data-saved="${saved}">${saved ? "Remove saved" : "Save product"}</button><button class="btn btn-primary" type="button" data-action="submit-purchase">Request product</button>`,{wide:true});
 }
 
 function openProfileEdit() {
@@ -1426,8 +1503,9 @@ function openProductEditor(product = null) {
   const p = product || {};
   resetPendingPhoto("product");
   const categoryOptions = state.marketCategories.length ? state.marketCategories.map((c) => [c.id,c.name || c.id]) : [];
-  const existingPhoto = p.mediaUrls?.[0]?.url ? `<img src="${esc(p.mediaUrls[0].url)}" alt="Current product photo" loading="lazy">` : `<span class="muted">No product photo selected</span>`;
-  modal(product ? "Edit product" : "Create product",`<form id="product-form" class="form-stack compact-form"><section class="catalogue-photo-editor"><div id="product-photo-preview">${existingPhoto}</div><button class="btn btn-secondary" type="button" data-action="pick-product-photo">${icon("camera",17)}Choose product photo</button><input id="product-photo-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif" hidden><small>Required for new products. Photos are optimized and securely stored in Cloudflare R2 (2 MiB max after optimization).</small></section><label class="floating-field"><input name="title" maxlength="200" value="${esc(p.title || "")}" required placeholder=" "><span>Product name</span></label><label class="floating-field"><textarea name="description" maxlength="3000" placeholder=" ">${esc(p.description || "")}</textarea><span>Description</span></label><label class="select-field"><span>Category</span><select name="categoryId"><option value="">No category</option>${categoryOptions.map(([id,label]) => `<option value="${esc(id)}" ${p.categoryId === id ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label><label class="floating-field"><input name="priceMinor" type="number" min="0" value="${esc(p.priceMinor ?? "0")}" required placeholder=" "><span>Price in minor units</span></label><label class="floating-field"><input name="currency" maxlength="3" value="${esc(p.currency || "NGN")}" required placeholder=" "><span>Currency</span></label><label class="floating-field"><input name="tags" maxlength="500" value="${esc((p.tags || []).join(", "))}" placeholder=" "><span>Tags, comma separated</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-product" data-id="${esc(p.id || "")}">${product ? "Save changes" : "Create product"}</button>`,{wide:true});
+  const existingPhoto = Array.isArray(p.mediaIds) && p.mediaIds.length ? `<div class="market-photo-preview-grid">${p.mediaIds.slice(0,8).map((mediaId,index) => { const media=p.mediaUrls?.[index]; return `<label class="market-existing-photo">${media?.url ? `<img src="${esc(media.url)}" alt="Current product photo ${index+1}" loading="lazy" decoding="async">` : `<span class="product-cover-icon">${icon("image",18)}</span>`}<span><input type="checkbox" name="keepProductMedia" value="${esc(mediaId)}" checked> Keep photo ${index+1}</span></label>`; }).join("")}</div>` : `<span class="muted">No product photos selected</span>`;
+  state.pendingProductPhotoFiles = [];
+  modal(product ? "Edit product" : "Create product",`<form id="product-form" class="form-stack compact-form"><section class="catalogue-photo-editor"><div id="product-photo-preview">${existingPhoto}</div><button class="btn btn-secondary" type="button" data-action="pick-product-photo">${icon("camera",17)}Choose photos (up to 8)</button><input id="product-photo-input" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple hidden><small>Choose up to 8 clear photos. Each is optimized before publishing; maximum 2 MiB per item and 2 MiB shared media allowance over the rolling past 24 hours.</small><div id="product-photo-results" class="media-compression-results" aria-live="polite"></div></section><label class="floating-field"><input name="title" maxlength="200" value="${esc(p.title || "")}" required placeholder=" "><span>Product name</span></label><label class="floating-field"><textarea name="description" maxlength="3000" placeholder=" ">${esc(p.description || "")}</textarea><span>Description</span></label><label class="select-field"><span>Category</span><select name="categoryId"><option value="">No category</option>${categoryOptions.map(([id,label]) => `<option value="${esc(id)}" ${p.categoryId === id ? "selected" : ""}>${esc(label)}</option>`).join("")}</select></label><label class="floating-field"><input name="priceMinor" type="number" min="0" value="${esc(p.priceMinor ?? "0")}" required placeholder=" "><span>Price in minor units</span></label><label class="floating-field"><input name="currency" maxlength="3" value="${esc(p.currency || "NGN")}" required placeholder=" "><span>Currency</span></label><label class="floating-field"><input name="tags" maxlength="500" value="${esc((p.tags || []).join(", "))}" placeholder=" "><span>Tags, comma separated</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-product" data-id="${esc(p.id || "")}">${product ? "Save changes" : "Create product"}</button>`,{wide:true});
 }
 
 function openStoreEditor() {
@@ -1442,7 +1520,77 @@ function openCreateMenu() {
   modal("Create",`<div class="create-choice-grid"><button class="path-card" type="button" data-action="create-post"><span class="path-icon">${icon("edit",20)}</span><strong>Create Post</strong><span>Share a community update.</span></button><button class="path-card" type="button" data-action="create-moment"><span class="path-icon">${icon("spark",20)}</span><strong>Create Moment</strong><span>Share a quick temporary update.</span></button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`);
 }
 
+document.addEventListener("pointerdown", (event) => {
+  if (event.target?.closest?.(".post-format-toolbar button")) event.preventDefault();
+});
+document.addEventListener("input", (event) => {
+  const editor = event.target;
+  if (!editor?.matches?.('[contenteditable="true"][data-post-editor]')) return;
+  const plain = editor.textContent || "";
+  if (!/\*\*[^*\n]{1,400}\*\*/.test(plain)) return;
+  // Keep typed Markdown shorthand legible while composing. The renderer still
+  // performs HTML escaping before turning the limited bold syntax into <strong>.
+  const selection = window.getSelection();
+  const caretAtEnd = selection?.rangeCount && selection.isCollapsed && selection.focusNode && editor.contains(selection.focusNode)
+    ? (() => { const range = selection.getRangeAt(0).cloneRange(); range.selectNodeContents(editor); range.setEnd(selection.focusNode, selection.focusOffset); return range.toString().length >= plain.length; })()
+    : false;
+  if (!caretAtEnd) return;
+  editor.innerHTML = markdownToRichEditor(plain);
+  const range = document.createRange();
+  range.selectNodeContents(editor);
+  range.collapse(false);
+  const nextSelection = window.getSelection();
+  nextSelection?.removeAllRanges();
+  nextSelection?.addRange(range);
+});
+
+app.addEventListener("error", (event) => {
+  const image = event.target;
+  if (!(image instanceof HTMLImageElement)) return;
+  if (image.dataset.postMedia === "true") {
+    const postId = image.dataset.postId;
+    const index = Number(image.dataset.mediaIndex);
+    const post = [...state.posts, ...state.savedPosts].find((entry) => String(entry.id) === String(postId));
+    if (!post || !Number.isInteger(index) || !Array.isArray(post.mediaIds) || !post.mediaIds[index]) return;
+    if (post.mediaRetryAt && Date.now() - post.mediaRetryAt < 60_000) return;
+    post.mediaRetryAt = Date.now();
+    post.mediaUrls = Array.isArray(post.mediaUrls) ? post.mediaUrls : Array(post.mediaIds.length).fill(null);
+    post.mediaUrls[index] = null;
+    post.mediaLoadErrorIndices = (post.mediaLoadErrorIndices || []).filter((value) => value !== index);
+    post.mediaLoadingIndices = (post.mediaLoadingIndices || []).filter((value) => value !== index);
+    void hydratePostMedia(post, [index]).then(() => { if (state.route === "home" || state.route === "saved-posts") paint(); });
+    return;
+  }
+  const kind = image.dataset.mediaKind;
+  const id = image.dataset.mediaId;
+  if (!kind || !id) return;
+  const list = kind === "market" ? [...state.products, ...state.savedMarketProducts, ...state.myProducts] : [...state.skills, ...state.skillListingsMine];
+  const item = list.find((entry) => String(entry.id || entry.productId) === String(id));
+  if (!item || item.mediaRetryAt && Date.now() - item.mediaRetryAt < 60_000) return;
+  item.mediaRetryAt = Date.now();
+  const index = Math.max(0, Number(image.dataset.mediaIndex || 0));
+  const retry = kind === "market" ? hydrateMarketProductMedia(item, true) : hydrateSkillListingMedia(item, true);
+  void Promise.resolve(retry).then(() => {
+    const refreshed = item.mediaUrls?.[index]?.url;
+    if (refreshed) image.src = refreshed;
+    if (state.route === "market" || state.route === "skills" || state.route === "skill-profile") paint();
+  });
+}, true);
+
 app.addEventListener("scroll", (event) => {
+  const marketTrack = event.target;
+  if (marketTrack?.matches?.("[data-market-detail-track]")) {
+    const count = marketTrack.querySelectorAll(".market-detail-slide").length;
+    const index = marketTrack.clientWidth ? Math.max(0, Math.min(count - 1, Math.round(marketTrack.scrollLeft / marketTrack.clientWidth))) : 0;
+    const root = marketTrack.closest(".market-detail-carousel");
+    const counter = root?.querySelector("[data-market-detail-count]");
+    if (counter) counter.textContent = `${index + 1} / ${Math.max(1,count)}`;
+    const prev = root?.querySelector('[data-action="market-media-prev"]');
+    const next = root?.querySelector('[data-action="market-media-next"]');
+    if (prev) prev.disabled = index <= 0;
+    if (next) next.disabled = index >= count - 1;
+    return;
+  }
   const track = event.target;
   if (!track?.matches?.("[data-post-carousel-track]")) return;
   const carousel = track.closest("[data-post-carousel]");
@@ -1487,14 +1635,6 @@ document.addEventListener("click", async (e) => {
   if (!actionEl) return;
   const a = actionEl.dataset.action;
   try {
-    if (a === "open-search-post") {
-      const post = [...state.homeSearchResults, ...state.searchResults].find((item) => String(item.id) === String(actionEl.dataset.id));
-      if (!post) { toast("That search result is no longer available.", "info"); return; }
-      const authorUid = String(post.authorUid || actionEl.dataset.author || "");
-      const postText = String(post.subtitle || "Public community update");
-      modal("Community post", `<article class="search-post-preview"><span class="eyebrow">PUBLIC POST</span><h3>${esc(post.title || "Community post")}</h3><p>${esc(postText)}</p><small>${esc(when(post.createdAt || post.updatedAt))}</small></article>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button>${authorUid ? `<button class="btn btn-primary" type="button" data-action="view-user" data-id="${esc(authorUid)}">View author</button>` : ""}`, {wide:true});
-      return;
-    }
     if (a === "close-modal") { clearTimeout(momentAutoCloseTimer); closeModal(); return; }
     if (a === "dismiss-discovery-banner") { stopDiscoveryBannerTimer(); discoveryBannerVisibleForUser = false; paint(); return; }
     if (a === "auth-welcome") { authMode="welcome"; paint(); return; }
@@ -1535,31 +1675,20 @@ document.addEventListener("click", async (e) => {
       return;
     }
     if (a.startsWith("legal-")) { document.getElementById("menu-root")?.remove(); openLegal(a.slice(6)); return; }
-    if (a === "feedback") { document.getElementById("menu-root")?.remove(); openFeedback(); return; }
     if (a === "install-app") {
       document.getElementById("menu-root")?.remove();
       if (deferredInstallPrompt) {
         const promptEvent = deferredInstallPrompt;
         deferredInstallPrompt = null;
-        promptEvent.prompt();
-        const choice = await promptEvent.userChoice.catch(() => ({outcome: "dismissed"}));
-        state.installAvailable = false;
-        toast(choice.outcome === "accepted" ? "Starting installation…" : "Installation was not started. You can try again from your browser menu.", choice.outcome === "accepted" ? "success" : "info");
+        await promptEvent.prompt();
+        const choice = await promptEvent.userChoice.catch(() => null);
+        toast(choice?.outcome === "accepted" ? "Install started." : "You can install Marvel Chat later from the browser menu.", "info");
       } else {
-        toast("To install Marvel Chat, open your browser menu and choose Install app or Add to Home screen when available.", "info");
+        toast("To install Marvel Chat, open your browser menu and choose Install app or Add to Home Screen when available.", "info");
       }
       return;
     }
-    if (a === "check-app-update") {
-      document.getElementById("menu-root")?.remove();
-      if (!("serviceWorker" in navigator)) { toast("App updates are managed by this browser.", "info"); return; }
-      try {
-        const registration = await navigator.serviceWorker.getRegistration("./sw.js");
-        if (registration) { await registration.update(); toast("Update check complete. If a new version is published, refresh after it becomes ready.", "success"); }
-        else toast("No app worker is registered for this page yet.", "info");
-      } catch (error) { toast("Could not check for an update right now. Please try again when online.", "error"); }
-      return;
-    }
+    if (a === "feedback") { document.getElementById("menu-root")?.remove(); openFeedback(); return; }
     if (a === "sign-out") { document.getElementById("menu-root")?.remove(); await signOut(auth); return; }
     if (a === "create-menu") { openCreateMenu(); return; }
     if (a === "pick-post-media") { document.getElementById("post-media")?.click(); return; }
@@ -1584,12 +1713,12 @@ document.addEventListener("click", async (e) => {
     if (a === "load-more-comments") { await loadCommentsPage(activeCommentPostId, {reset: false}); return; }
     if (a === "toggle-post-text") {
       const targetId = actionEl.dataset.id;
-      for (const post of [...state.posts, ...state.savedPosts]) if (post.id === targetId) post.textExpanded = !post.textExpanded;
+      for (const post of [...state.posts, ...state.savedPosts, ...state.homeSearchResults, ...state.searchResults]) { const candidate=post.result || post; if (String(candidate.id||candidate.postId) === String(targetId)) candidate.textExpanded = !candidate.textExpanded; }
       paint(); return;
     }
     if (a === "create-post") { closeModal(); openCreatePost(); return; }
     if (a === "create-moment") { closeModal(); openCreateMoment(); return; }
-    if (a === "submit-post") { if (state.pendingMediaProcessing) { toast("Please wait until media compression finishes.", "error"); return; } const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(d.text || "").trim(); const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; state.pendingMediaProcessing=false; closeModal(); toast("Post published.","success"); await loadHome({reset: true}); paint(); return; }
+    if (a === "submit-post") { if (state.pendingMediaProcessing) { toast("Please wait until media compression finishes.", "error"); return; } const f=document.getElementById("post-form"); const d=Object.fromEntries(new FormData(f)); const text=String(richEditorMarkdown("post-text-editor") || "").trim(); document.getElementById("post-text").value=text; const files=Array.isArray(state.pendingMediaFiles) ? state.pendingMediaFiles : []; if(!text && files.length===0){toast("Add text or media before publishing.","error");return;} const mediaIds=files.length ? await uploadHomeMediaFiles(files) : []; await api.createPost({text,mediaIds,visibility:String(d.visibility || "public")}); state.pendingMediaFile=null; state.pendingMediaFiles=[]; state.pendingMediaProcessing=false; closeModal(); toast("Post published.","success"); await loadHome({reset: true}); paint(); return; }
     if (a === "submit-moment") { const f=document.getElementById("moment-form"); const d=Object.fromEntries(new FormData(f)); let contentType=String(d.contentType || "text"); const text=String(d.text || "").trim(); const needsMedia=["photo","photo_text","video","video_text"].includes(contentType); if(needsMedia && !state.pendingMomentFile){toast("Choose a photo or video for this Moment.","error");return;} if(state.pendingMomentFile){const selectedVideo=state.pendingMomentFile.type.startsWith("video/"); if(selectedVideo && !contentType.startsWith("video")) contentType=text ? "video_text" : "video"; if(!selectedVideo && !contentType.startsWith("photo")) contentType=text ? "photo_text" : "photo";} let mediaId=null; if(state.pendingMomentFile) mediaId=await uploadMomentMedia(state.pendingMomentFile); await api.createMoment({contentType,text,mediaId}); state.pendingMomentFile=null; closeModal(); toast("Moment published.","success"); await loadHome({reset: true}); paint(); return; }
     if (a === "post-menu") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(!p)return; modal("Post options",`<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="edit-post" data-id="${esc(p.id)}">Edit post</button><button class="btn btn-secondary btn-block" type="button" data-action="delete-post" data-id="${esc(p.id)}">Delete post</button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`); return; }
     if (a === "edit-post") { const p=[...state.posts,...state.savedPosts].find((x)=>x.id===actionEl.dataset.id); if(!p)return; await openPostEditor(p); return; }
@@ -1600,7 +1729,8 @@ document.addEventListener("click", async (e) => {
       const form = document.getElementById("edit-post-form");
       const data = new FormData(form);
       const postId = String(data.get("postId") || actionEl.dataset.id || "");
-      const text = String(data.get("text") || "").trim();
+      const text = String(richEditorMarkdown("edit-post-text-editor") || "").trim();
+      document.getElementById("edit-post-text").value = text;
       const keptMediaIds = data.getAll("keepMediaIds").map(String);
       const addedFiles = Array.isArray(state.pendingEditMediaFiles) ? state.pendingEditMediaFiles : [];
       if (keptMediaIds.length + addedFiles.length > 10) { toast("A post can contain at most 10 photos or videos.", "error"); return; }
@@ -1708,72 +1838,13 @@ document.addEventListener("click", async (e) => {
     if (a === "clear-home-search") { state.searchQuery="";state.homeSearchResults=[];paint();return; }
     if (a === "clear-chat-search") { state.chatSearchQuery="";state.chatSearchResults=[];paint();return; }
     if (a === "focus-chat-search") { state.route="chat"; paint(); setTimeout(()=>document.querySelector('#chat-person-search-form input[name="query"]')?.focus(),0); return; }
-    if (a === "open-thread") { state.activeThreadId=actionEl.dataset.id;state.chatMenuThreadId="";state.messages=[];const thread=state.threads.find((x)=>x.id===state.activeThreadId);if(thread) await hydrateThreadPeer(thread);paint();await loadMessages(state.activeThreadId);return; }
+    if (a === "open-thread") { state.activeThreadId=actionEl.dataset.id;state.messages=[];const thread=state.threads.find((x)=>x.id===state.activeThreadId);if(thread) await hydrateThreadPeer(thread);paint();await loadMessages(state.activeThreadId);return; }
     if (a === "close-thread") { clearSubscriptions();state.activeThreadId=null;state.messages=[];go("chat");return; }
-    if (a === "chat-filter") { state.chatFilter = actionEl.dataset.filter === "archived" ? "archived" : "all"; state.chatMenuThreadId=""; paint(); return; }
-    if (a === "thread-menu") {
-      const threadId = actionEl.dataset.id || state.activeThreadId;
-      const thread = state.threads.find((item) => item.id === threadId);
-      if (!thread) return;
-      if (!state.activeThreadId) { state.chatMenuThreadId = state.chatMenuThreadId === threadId ? "" : threadId; paint(); return; }
-      const isPinned = Array.isArray(thread.pinnedUids) && thread.pinnedUids.includes(state.user.uid);
-      const isArchived = Array.isArray(thread.archivedUids) && thread.archivedUids.includes(state.user.uid);
-      modal("Conversation options", `<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="toggle-pin-thread" data-id="${esc(threadId)}">${isPinned ? "Unpin conversation" : "Pin conversation"}</button><button class="btn btn-secondary btn-block" type="button" data-action="toggle-archive-thread" data-id="${esc(threadId)}">${isArchived ? "Unarchive conversation" : "Archive conversation"}</button><button class="btn btn-secondary btn-block" type="button" data-action="hide-thread" data-id="${esc(threadId)}">Delete conversation for me</button></div>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`);
-      return;
-    }
-    if (a === "toggle-pin-thread" || a === "toggle-archive-thread" || a === "hide-thread") {
-      const threadId = actionEl.dataset.id || state.activeThreadId;
-      const thread = state.threads.find((item) => item.id === threadId);
-      if (!threadId || !thread) return;
-      const preference = a === "toggle-pin-thread" ? "pin" : a === "toggle-archive-thread" ? "archive" : "delete_for_me";
-      const field = preference === "pin" ? "pinnedUids" : preference === "archive" ? "archivedUids" : "hiddenForUids";
-      const currentlyEnabled = Array.isArray(thread[field]) && thread[field].includes(state.user.uid);
-      const enabled = preference === "delete_for_me" ? true : !currentlyEnabled;
-      await api.updateChatThreadPreference({threadId, preference, enabled});
-      closeModal();
-      if (a === "hide-thread" && state.activeThreadId === threadId) { clearSubscriptions(); state.activeThreadId = null; state.messages = []; }
-      state.chatMenuThreadId = "";
-      await loadThreads();
-      toast(a === "hide-thread" ? "Conversation removed from your chat list." : a === "toggle-pin-thread" ? (enabled ? "Conversation pinned." : "Conversation unpinned.") : (enabled ? "Conversation archived." : "Conversation restored."), "success");
-      paint();
-      return;
-    }
-    if (a === "message-menu") {
-      const m = state.messages.find((item) => item.id === actionEl.dataset.id);
-      if (!m) return;
-      const own = m.senderUid === state.user.uid;
-      modal("Message options", `<div class="form-stack">${own && m.status !== "deleted_for_everyone" && typeof m.text === "string" && m.text ? `<button class="btn btn-secondary btn-block" type="button" data-action="edit-message" data-id="${esc(m.id)}">Edit message</button>` : ""}<button class="btn btn-secondary btn-block" type="button" data-action="delete-message-for-me" data-id="${esc(m.id)}">Delete for me</button>${own && m.status !== "deleted_for_everyone" ? `<button class="btn btn-secondary btn-block" type="button" data-action="delete-message-for-everyone" data-id="${esc(m.id)}">Delete for everyone</button>` : ""}</div>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`);
-      return;
-    }
-    if (a === "edit-message") {
-      const m = state.messages.find((item) => item.id === actionEl.dataset.id);
-      if (!m || m.senderUid !== state.user.uid || m.status === "deleted_for_everyone") return;
-      modal("Edit message", `<form id="edit-message-form" class="form-stack"><input type="hidden" name="messageId" value="${esc(m.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(m.text || "")}</textarea><span>Message text</span></label><small class="muted">Editing updates this message for the conversation.</small></form>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-message">Save edit</button>`, {wide:true});
-      return;
-    }
-    if (a === "submit-edit-message") {
-      const form = document.getElementById("edit-message-form");
-      if (!form) return;
-      const data = Object.fromEntries(new FormData(form));
-      const text = String(data.text || "").trim();
-      if (!text) { toast("Message cannot be empty.", "error"); return; }
-      await api.editMessage({threadId: state.activeThreadId, messageId: String(data.messageId || ""), text});
-      closeModal(); toast("Message updated.", "success"); return;
-    }
-    if (a === "delete-message-for-me") {
-      await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode:"for_me"});
-      state.messages = state.messages.filter((item) => item.id !== actionEl.dataset.id);
-      closeModal(); paint(); toast("Message removed from your view.", "success"); return;
-    }
-    if (a === "delete-message-for-everyone") {
-      modal("Delete for everyone?", "This removes your message from the conversation for all participants.", `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="confirm-delete-message" data-id="${esc(actionEl.dataset.id)}">Delete for everyone</button>`);
-      return;
-    }
-    if (a === "confirm-delete-message") {
-      await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode:"for_everyone"});
-      closeModal(); toast("Message deleted for everyone.", "success"); return;
-    }
-    if (a === "delete-message") { await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode:"for_everyone"});toast("Message deleted.","success");return; }
+    if (a === "thread-options") { const thread=state.threads.find((x)=>String(x.id)===String(actionEl.dataset.id)); if(!thread)return; const uid=String(state.user.uid); const pinned=Array.isArray(thread.pinnedUids)&&thread.pinnedUids.includes(uid); const archived=Array.isArray(thread.archivedUids)&&thread.archivedUids.includes(uid); modal("Conversation options",`<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="set-thread-preference" data-id="${esc(thread.id)}" data-pref="pin" data-enabled="${!pinned}">${pinned?"Unpin conversation":"Pin conversation"}</button><button class="btn btn-secondary btn-block" type="button" data-action="set-thread-preference" data-id="${esc(thread.id)}" data-pref="archive" data-enabled="${!archived}">${archived?"Unarchive conversation":"Archive conversation"}</button><button class="btn btn-secondary btn-block" type="button" data-action="set-thread-preference" data-id="${esc(thread.id)}" data-pref="delete_for_me" data-enabled="true">Delete conversation for me</button></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button>`); return; }
+    if (a === "set-thread-preference") { const threadId=String(actionEl.dataset.id||""); const preference=String(actionEl.dataset.pref||""); const enabled=actionEl.dataset.enabled==="true"; await api.updateChatThreadPreference({threadId,preference,enabled}); const thread=state.threads.find((x)=>String(x.id)===threadId); const field={pin:"pinnedUids",archive:"archivedUids",delete_for_me:"hiddenForUids"}[preference]; if(thread&&field){const prior=Array.isArray(thread[field])?thread[field]:[];thread[field]=enabled?[...new Set([...prior,String(state.user.uid)])]:prior.filter((id)=>String(id)!==String(state.user.uid));} if(preference==="delete_for_me"&&enabled){state.threads=state.threads.filter((x)=>String(x.id)!==threadId);if(state.activeThreadId===threadId){clearSubscriptions();state.activeThreadId=null;state.messages=[];}} closeModal();state.threadsLoadedAt=Date.now();toast(preference==="pin"?(enabled?"Conversation pinned.":"Conversation unpinned."):preference==="archive"?(enabled?"Conversation archived.":"Conversation restored."):"Conversation removed from your chat list.","success");paint();return; }
+    if (a === "edit-message") { const msg=state.messages.find((x)=>String(x.id)===String(actionEl.dataset.id)); if(!msg||msg.senderUid!==state.user.uid||msg.status==="deleted_for_everyone")return; modal("Edit message",`<form id="edit-message-form" class="form-stack"><input type="hidden" name="messageId" value="${esc(msg.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(msg.text||"")}</textarea><span>Message</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="save-message-edit">Save</button>`); return; }
+    if (a === "save-message-edit") { const form=document.getElementById("edit-message-form"); if(!form)return; const d=Object.fromEntries(new FormData(form)); const text=String(d.text||"").trim(); if(!text){toast("Message cannot be empty.","error");return;} await api.editMessage({threadId:state.activeThreadId,messageId:String(d.messageId),text}); const msg=state.messages.find((x)=>String(x.id)===String(d.messageId)); if(msg){msg.text=text;msg.editedAt=new Date();} closeModal();toast("Message updated.","success");paint();return; }
+    if (a === "delete-message") { const mode=actionEl.dataset.mode||"for_everyone"; if(mode==="for_everyone"&& !window.confirm("Delete this message for everyone?"))return; await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode}); if(mode==="for_me"){const msg=state.messages.find((x)=>String(x.id)===String(actionEl.dataset.id));if(msg){msg.deletedForUids=[...new Set([...(msg.deletedForUids||[]),String(state.user.uid)])];}}else{const msg=state.messages.find((x)=>String(x.id)===String(actionEl.dataset.id));if(msg){msg.text="";msg.status="deleted_for_everyone";}}toast(mode==="for_me"?"Message removed from your view.":"Message deleted for everyone.","success");paint();return; }
     if (a === "message-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); const profile=item?.result || item || {}; const derivedUsername = profile.username || String(item?.subtitle || "").replace(/^@/, ""); state.threadPeers[target]={uid:target,displayName:item?.title || profile.displayName || derivedUsername || "Conversation",username:derivedUsername,photoURL:profile.photoURL || null};saveThreadPeers(); const id=await findOrCreateDirectThread(target,state.threadPeers[target]); state.route="chat";state.activeThreadId=id;await loadThreads();paint();await loadMessages(id);return; }
     if (a === "view-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); await openPublicUserProfile(target,item || {}); return; }
     if (a === "follow-user" || a === "unfollow-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const current=await api.getFollowState({targetUid:target}); if(current?.following){await api.unfollowUser({targetUid:target});state.followingIds=state.followingIds.filter((id)=>String(id)!==String(target));toast("No longer following.","success");}else{await api.followUser({targetUid:target});state.followingIds=[...new Set([...state.followingIds,String(target)])];toast("Following.","success");} if(state.route === "home"){await loadHome({reset:true});} paint(); return; }
@@ -1782,37 +1853,36 @@ document.addEventListener("click", async (e) => {
     if (a === "submit-skill-request") { const d=Object.fromEntries(new FormData(document.getElementById("skill-request-form"))); await api.createSkillRequest({title:String(d.title || "").trim(),description:String(d.description || "").trim(),listingId:d.listingId,currency:"NGN",budgetMinMinor:d.budgetMinMinor ? safeMinor(d.budgetMinMinor) : null,budgetMaxMinor:d.budgetMaxMinor ? safeMinor(d.budgetMaxMinor) : null}); closeModal();toast("Skill request sent.","success");return; }
     if (a === "create-skill-listing") { if(!state.skillProfile){go("skill-onboarding");return;} openSkillListingEditor();return; }
     if (a === "edit-skill-listing") { const s=state.skillListingsMine.find((x)=>x.id===actionEl.dataset.id); if(s)openSkillListingEditor(s);return; }
-    if (a === "pause-skill-listing" || a === "activate-skill-listing") { await api.updateSkillListing({listingId:actionEl.dataset.id,status:a === "activate-skill-listing" ? "active" : "paused"});toast(a === "activate-skill-listing" ? "Service offered again." : "Service paused.","success");await loadSkillWorkspace();paint();return; }
-    if (a === "delete-skill-listing") {
-      const id = String(actionEl.dataset.id || "");
-      if (!id) return;
-      modal("Delete service?", "This removes the service from public Skills listings. A hidden record may remain only when needed for existing request history.", `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-danger" type="button" data-action="confirm-delete-skill-listing" data-id="${esc(id)}">Delete service</button>`);
+    if (a === "pause-skill-listing" || a === "activate-skill-listing") { await api.updateSkillListing({listingId:actionEl.dataset.id,status:a === "activate-skill-listing" ? "active" : "paused"});toast(a === "activate-skill-listing" ? "Service offered again." : "Service paused.","success");await loadSkillWorkspace(true);paint();return; }
+    if (a === "delete-skill-listing") { const listingId=actionEl.dataset.id; if(!window.confirm("Delete this service from Marvel Skills? It will no longer appear in public listings.")) return; const deleted=await api.deleteSkillListing({listingId}); const mediaIds=Array.isArray(deleted?.mediaIds)?deleted.mediaIds:[]; if(mediaIds.length){try{await api.cleanupDeletedMedia({feature:"skill_listing",parentId:listingId,parentCollection:"skillListings",mediaIds});}catch(error){console.debug("[Marvel Chat] service media cleanup pending",error?.code);}} const purged=await api.purgeDeletedSkillListing({listingId}); state.skillListingsMine=state.skillListingsMine.filter((item)=>String(item.id)!==String(listingId)); state.skills=state.skills.filter((item)=>String(item.id)!==String(listingId)); state.skillsLoadedAt=0; await loadSkillWorkspace(true); await loadSkills(true); toast(purged?.retainedForHistory?"Service removed from discovery; request history was retained.":"Service deleted.","success");paint();return; }
+    if (a === "market-view") { const id=actionEl.dataset.id; const m=[...state.products,...state.savedMarketProducts].find((x)=>String(x.id || x.productId)===String(id) || String(x.result?.id || x.result?.productId)===String(id)); if(m){await hydrateMarketProductMedia(m);openMarketProduct(m);}else{toast("This product is not available in the current results. Refresh Market and try again.","info");}return; }
+    if (a === "market-view-shop") { await openMarketShop(actionEl.dataset.id); return; }
+    if (a === "market-media-prev" || a === "market-media-next") {
+      const track = document.querySelector("#modal-root [data-market-detail-track]");
+      if (!track) return;
+      const delta = a === "market-media-prev" ? -1 : 1;
+      track.scrollBy({left: delta * track.clientWidth, behavior: "smooth"});
       return;
     }
-    if (a === "confirm-delete-skill-listing") {
-      const listingId = String(actionEl.dataset.id || "");
-      if (!listingId) return;
-      const deleted = await api.deleteSkillListing({listingId});
-      let cleanup = {pendingIds: [], retainedIds: []};
-      if (Array.isArray(deleted?.mediaIds) && deleted.mediaIds.length) {
-        try { cleanup = await api.cleanupDeletedMedia({feature:"skill_listing",parentId:listingId,parentCollection:"skillListings"}); }
-        catch (error) { console.warn("[Marvel Chat] service media cleanup remains pending", error?.code || error?.message); cleanup = {pendingIds: deleted.mediaIds}; }
+    if (a === "save-market-product") { const productId=actionEl.dataset.id; const wasSaved=state.marketSavedProductIds.includes(String(productId)); await api.saveMarketProduct({productId,saved:!wasSaved}); state.marketSavedProductIds=wasSaved?state.marketSavedProductIds.filter((id)=>String(id)!==String(productId)):[...new Set([...state.marketSavedProductIds,String(productId)])]; if(wasSaved)state.savedMarketProducts=state.savedMarketProducts.filter((p)=>String(p.id)!==String(productId)); else {const item=state.products.find((p)=>String(p.id)===String(productId));if(item)state.savedMarketProducts=[item,...state.savedMarketProducts.filter((p)=>String(p.id)!==String(productId))];} toast(wasSaved?"Removed from saved products.":"Product saved for later.","success"); if(document.getElementById("modal-root")?.textContent?.includes("Product")) closeModal(); paint(); return; }
+    if (a === "show-saved-market") {
+      if(!state.savedMarketProducts.length){
+        const saved=await api.getMySavedMarketProducts({limit:40});
+        state.savedMarketProducts=Array.isArray(saved?.products)?saved.products.map((item)=>({...item,id:item.id||item.productId||""})):[];
+        state.marketSavedProductIds=Array.isArray(saved?.productIds)?saved.productIds.map(String):state.marketSavedProductIds;
       }
-      if (!(cleanup.pendingIds || []).length && !(cleanup.retainedIds || []).length) {
-        try { await api.purgeDeletedSkillListing({listingId}); }
-        catch (error) { console.warn("[Marvel Chat] service tombstone retained", error?.code || error?.message); }
-      }
-      closeModal();
-      toast((cleanup.pendingIds || []).length ? "Service removed from listings. Media cleanup is pending." : "Service removed from public listings.", (cleanup.pendingIds || []).length ? "info" : "success");
-      await loadSkillWorkspace();
-      paint();
-      return;
+      // Fetch media URLs only for the first visible saved products; opening one
+      // product refreshes its URLs on demand. This avoids a burst of signed-URL calls.
+      await Promise.all(state.savedMarketProducts.slice(0,6).map((p)=>hydrateMarketProductMedia(p)));
+      const body=state.savedMarketProducts.length?`<div class="product-grid">${state.savedMarketProducts.map((p)=>`<button type="button" class="shop-product-card" data-action="market-view" data-id="${esc(p.id)}"><span class="shop-product-photo">${p.mediaUrls?.[0]?.url?`<img src="${esc(p.mediaUrls[0].url)}" alt="${esc(p.title||"Product photo")}" loading="lazy" decoding="async">`:icon("market",20)}</span><span class="shop-product-copy"><strong>${esc(p.title||"Product")}</strong><small>${money(p.priceMinor,p.currency||"NGN")}</small></span></button>`).join("")}</div>`:`<div class="empty-state"><strong>No saved products yet</strong><span>Save products from the Market to find them here.</span></div>`;
+      modal("Saved products",body,`<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button>`,{wide:true}); return;
     }
-    if (a === "market-view") { const m=[...state.products,...state.savedMarketProducts].find((x)=>String(x.id || x.result?.id)===String(actionEl.dataset.id)); if(m){await hydrateMarketProductMedia(m);openMarketProduct(m);}return; }
+    if (a === "profile-posts") { go("home"); return; }
+    if (a === "profile-followers" || a === "profile-following") { const kind=a==="profile-followers"?"followers":"following"; const res=await api.getFollowList({direction:kind,targetUid:state.user.uid,limit:40}); const list=Array.isArray(res?.users)?res.users:Array.isArray(res?.items)?res.items:[]; modal(kind==="followers"?"Followers":"Following",list.length?`<div class="follow-list">${list.map((p)=>`<button class="follow-list-item" type="button" data-action="view-user" data-id="${esc(p.uid||p.id||"")}">${avatar(p,"sm",true)}<span><strong>${esc(p.displayName||p.username||"Member")}</strong><small>${p.username?`@${esc(p.username)}`:"Marvel Chat member"}</small></span></button>`).join("")}</div>`:`<div class="empty-state"><strong>No ${kind} to show</strong><span>As your community grows, the list will appear here.</span></div>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button>`,{wide:true}); return; }
     if (a === "submit-purchase") { const d=Object.fromEntries(new FormData(document.getElementById("purchase-form"))); const quantity=Math.max(1,Math.min(1000,Number(d.quantity||1))); await api.createMarketCommerceRequest({items:[{productId:d.productId,quantity}],customerNote:String(d.customerNote || "").trim()});closeModal();toast("Commerce request sent.","success");return; }
     if (a === "route-seller-onboarding") { state.sellerOnboardingStep=0;go("seller-onboarding");return; }
-    if (a === "submit-store") { const d=Object.fromEntries(new FormData(document.getElementById("seller-details-form"))); if(state.myStore){await api.updateStoreProfile({storeId:state.myStore.id,name:String(d.name).trim(),description:String(d.description || "").trim(),locationText:String(d.location || "").trim()});toast("Store updated.","success");}else{const r=await api.createStore({name:String(d.name).trim(),description:String(d.description || "").trim(),category:String(d.category || "").trim(),location:String(d.location || "").trim()});state.sellerDraft={...state.sellerDraft,...d,storeId:r?.storeId || "",agreed:true};saveSellerDraft();toast("Store created.","success");}closeModal();await loadBusinessWorkspace();go("business");return; }
-    if (a === "store-status-toggle") { await api.setStoreStatus({storeId:state.myStore.id,status:actionEl.dataset.status});toast(actionEl.dataset.status === "active" ? "Store is open." : "Store is paused.","success");await loadBusinessWorkspace();paint();return; }
+    if (a === "submit-store") { const d=Object.fromEntries(new FormData(document.getElementById("seller-details-form"))); if(state.myStore){await api.updateStoreProfile({storeId:state.myStore.id,name:String(d.name).trim(),description:String(d.description || "").trim(),locationText:String(d.location || "").trim()});toast("Store updated.","success");}else{const r=await api.createStore({name:String(d.name).trim(),description:String(d.description || "").trim(),category:String(d.category || "").trim(),location:String(d.location || "").trim()});state.sellerDraft={...state.sellerDraft,...d,storeId:r?.storeId || "",agreed:true};saveSellerDraft();toast("Store created.","success");}closeModal();await loadBusinessWorkspace(true);state.marketLoaded=false;await loadMarket(true);go("business");return; }
+    if (a === "store-status-toggle") { await api.setStoreStatus({storeId:state.myStore.id,status:actionEl.dataset.status});toast(actionEl.dataset.status === "active" ? "Store is open." : "Store is paused.","success");await loadBusinessWorkspace(true);paint();return; }
     if (a === "create-product") { if(!state.myStore){go("seller-onboarding");return;}openProductEditor();return; }
     if (a === "edit-product") { const p=state.myProducts.find((x)=>x.id===actionEl.dataset.id);if(p)openProductEditor(p);return; }
     if (a === "submit-product") {
@@ -1828,23 +1898,28 @@ document.addEventListener("click", async (e) => {
         currency: String(d.currency || "NGN").trim().toUpperCase(),
         tags: String(d.tags || "").split(",").map((x) => x.trim()).filter(Boolean)
       };
-      let mediaIds = Array.isArray(existing?.mediaIds) ? [...existing.mediaIds] : [];
-      const oldMediaIds = [...mediaIds];
-      if (state.pendingProductPhotoFile) {
-        const newMediaId = await uploadMarketProductPhoto(state.pendingProductPhotoFile);
-        mediaIds = [newMediaId, ...mediaIds.filter((mediaId) => mediaId !== newMediaId)].slice(0, 5);
+      const keepIds = id ? [...f.querySelectorAll('input[name="keepProductMedia"]:checked')].map((input) => input.value) : [];
+      const oldMediaIds = Array.isArray(existing?.mediaIds) ? [...existing.mediaIds] : [];
+      const newFiles = Array.isArray(state.pendingProductPhotoFiles) ? state.pendingProductPhotoFiles : [];
+      if (newFiles.length > 8 || keepIds.length + newFiles.length > 8) {
+        toast("A product can have up to eight photos. Remove a photo or choose fewer new ones.", "error");
+        return;
+      }
+      let mediaIds = [...keepIds];
+      for (const file of newFiles) {
+        mediaIds.push(await uploadMarketProductPhoto(file));
       }
       if (!id && mediaIds.length === 0) {
-        toast("Choose a product photo before creating the listing.", "error");
+        toast("Choose at least one product photo before creating the listing.", "error");
         return;
       }
       if (id) {
-        const update = {...payload};
-        if (state.pendingProductPhotoFile) update.mediaIds = mediaIds;
+        const update = {...payload, mediaIds};
         await api.updateProduct({productId:id,...update});
-        if (state.pendingProductPhotoFile && oldMediaIds.length) {
-          try { await api.cleanupDeletedMedia({feature:"market_product",parentId:id,parentCollection:"products",mediaIds:oldMediaIds}); }
-          catch (error) { console.debug("[Marvel Chat] old product photo cleanup pending", error?.code || error?.message); }
+        const removedIds = oldMediaIds.filter((mediaId) => !mediaIds.includes(mediaId));
+        if (removedIds.length) {
+          try { await api.cleanupDeletedMedia({feature:"market_product",parentId:id,parentCollection:"products",mediaIds:removedIds}); }
+          catch (error) { console.debug("[Marvel Chat] removed product photo cleanup pending", error?.code || error?.message); }
         }
       } else {
         await api.createProduct({storeId:state.myStore.id,...payload,mediaIds});
@@ -1852,32 +1927,17 @@ document.addEventListener("click", async (e) => {
       resetPendingPhoto("product");
       closeModal();
       toast(id ? "Product updated." : "Product created.","success");
-      await loadBusinessWorkspace();
+      await loadBusinessWorkspace(true);
+      state.marketLoaded = false;
+      await loadMarket(true);
       paint();
       return;
     }
     if (a === "inventory-product") { const p=state.myProducts.find((x)=>x.id===actionEl.dataset.id);if(!p)return;modal("Update inventory",`<form id="inventory-form" class="form-stack"><input type="hidden" name="productId" value="${esc(p.id)}"><label class="floating-field"><input name="inventoryQuantity" type="number" min="1" max="1000000" value="${Number(p.inventoryQuantity || 0)}" required placeholder=" "><span>Inventory quantity</span></label></form>`,`<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-inventory">Save stock</button>`);return; }
-    if (a === "submit-inventory") { const d=Object.fromEntries(new FormData(document.getElementById("inventory-form"))); await api.setProductInventory({productId:d.productId,inventoryQuantity:Math.max(1,Math.floor(Number(d.inventoryQuantity||1)))});closeModal();toast("Inventory updated.","success");await loadBusinessWorkspace();paint();return; }
-    if (a === "activate-product" || a === "pause-product") { await api.setProductAvailability({productId:actionEl.dataset.id,status:a === "activate-product" ? "active" : "paused"});toast(a === "activate-product" ? "Product activated." : "Product paused.","success");await loadBusinessWorkspace();paint();return; }
-    if (a === "archive-product") { await api.archiveProduct({productId:actionEl.dataset.id});toast("Product archived.","success");await loadBusinessWorkspace();paint();return; }
-    if (a === "commerce-status") { await api.updateMarketCommerceRequestStatus({requestId:actionEl.dataset.id,status:actionEl.dataset.status});toast("Commerce request updated.","success");await loadBusinessWorkspace();paint();return; }
-    if (a === "profile-follow-list") {
-      const direction = actionEl.dataset.direction === "following" ? "following" : "followers";
-      const title = direction === "following" ? "Following" : "Followers";
-      modal(title, `<div class="profile-follow-list" id="profile-follow-list-content"><div class="feed-loader" role="status">Loading ${title.toLowerCase()}…</div></div>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Done</button>`, {wide:true});
-      try {
-        const result = await api.getFollowList({targetUid:state.user.uid,direction,limit:50});
-        const box = document.getElementById("profile-follow-list-content");
-        if (!box) return;
-        const users = Array.isArray(result?.users) ? result.users : [];
-        box.innerHTML = users.length ? users.map((person) => `<button class="profile-follow-row" type="button" data-action="open-user-profile" data-id="${esc(person.uid)}">${avatar(person,"sm",true)}<span><strong>${esc(person.displayName || person.username || "Marvel Chat member")}</strong><small>${esc(person.username ? `@${person.username}` : "Member")}</small></span>${icon("arrow",16)}</button>`).join("") : `<p class="muted">${direction === "following" ? "You are not following anyone yet." : "You do not have any followers yet."}</p>`;
-      } catch (error) {
-        const box = document.getElementById("profile-follow-list-content");
-        if (box) box.innerHTML = `<p class="muted">The list could not be loaded. Please try again.</p>`;
-        throw error;
-      }
-      return;
-    }
+    if (a === "submit-inventory") { const d=Object.fromEntries(new FormData(document.getElementById("inventory-form"))); await api.setProductInventory({productId:d.productId,inventoryQuantity:Math.max(1,Math.floor(Number(d.inventoryQuantity||1)))});closeModal();toast("Inventory updated.","success");await loadBusinessWorkspace(true);paint();return; }
+    if (a === "activate-product" || a === "pause-product") { await api.setProductAvailability({productId:actionEl.dataset.id,status:a === "activate-product" ? "active" : "paused"});toast(a === "activate-product" ? "Product activated." : "Product paused.","success");await loadBusinessWorkspace(true);paint();return; }
+    if (a === "archive-product") { await api.archiveProduct({productId:actionEl.dataset.id});toast("Product archived.","success");await loadBusinessWorkspace(true);paint();return; }
+    if (a === "commerce-status") { await api.updateMarketCommerceRequestStatus({requestId:actionEl.dataset.id,status:actionEl.dataset.status});toast("Commerce request updated.","success");await loadBusinessWorkspace(true);paint();return; }
     if (a === "edit-profile") { openProfileEdit();return; }
     if (a === "submit-profile") {
       const d = Object.fromEntries(new FormData(document.getElementById("profile-form")));
@@ -1895,70 +1955,24 @@ document.addEventListener("click", async (e) => {
       await updateAuthProfile(state.user, {displayName: payload.displayName});
       if (state.pendingProfilePhotoPreview) URL.revokeObjectURL(state.pendingProfilePhotoPreview);
       state.pendingProfilePhotoPreview = "";
+      state.pendingProfilePhotoInfo = "";
       state.pendingProfilePhotoFile = null;
       closeModal();
-      await loadProfile();
+      state.profileLoadedAt = 0;
+      await loadProfile(true);
       toast("Profile updated.", "success");
       paint();
       return;
     }
-    if (a === "read-notification") { await api.markNotificationRead({notificationId:actionEl.dataset.id});await loadNotifications();paint();return; }
+    if (a === "read-notification") { await api.markNotificationRead({notificationId:actionEl.dataset.id});await loadNotifications(true);paint();return; }
     if (a === "enable-notifications") { await enableBrowserNotifications(); return; }
     if (a === "disable-notifications") { await disableBrowserNotifications(); return; }
     if (a.startsWith("theme-")) { const t=a.slice(6);setTheme(t);paint();try{await api.updateUserSettings({themeId:t});}catch{}return; }
     if (a === "market-category") { state.marketCategory=actionEl.dataset.category || "all";paint();return; }
-    if (a === "market-filter-shop") { state.marketShowSaved = false; state.marketShopFilter = String(actionEl.dataset.id || ""); paint(); return; }
-    if (a === "market-clear-shop") { state.marketShopFilter = ""; paint(); return; }
-    if (a === "toggle-market-saved-view") {
-      state.marketShopFilter = "";
-      state.marketShowSaved = !state.marketShowSaved;
-      paint();
-      const items = state.marketShowSaved ? state.savedMarketProducts : state.products;
-      void Promise.all(items.slice(0, 8).map((item) => hydrateMarketProductMedia(item))).then(() => { if (state.route === "market") paint(); });
-      return;
-    }
-    if (a === "toggle-saved-market-product") {
-      const productId = String(actionEl.dataset.id || "");
-      if (!productId) return;
-      const all = [...state.products, ...state.savedMarketProducts];
-      const item = all.find((candidate) => String(candidate.id || candidate.result?.id) === productId);
-      const product = item?.result || item;
-      if (!product) return;
-      const wasSaved = state.savedMarketProductIds.includes(productId);
-      const desired = !wasSaved;
-      if (desired) {
-        state.savedMarketProductIds = [...new Set([...state.savedMarketProductIds, productId])];
-        if (!state.savedMarketProducts.some((candidate) => String(candidate.id) === productId)) state.savedMarketProducts = [{...product}, ...state.savedMarketProducts].slice(0, 40);
-      } else {
-        state.savedMarketProductIds = state.savedMarketProductIds.filter((id) => String(id) !== productId);
-        state.savedMarketProducts = state.savedMarketProducts.filter((candidate) => String(candidate.id) !== productId);
-      }
-      paint();
-      try {
-        const result = await api.saveMarketProduct({productId, saved: desired});
-        const actual = Boolean(result?.saved);
-        if (actual !== desired) {
-          if (actual) state.savedMarketProductIds = [...new Set([...state.savedMarketProductIds, productId])];
-          else state.savedMarketProductIds = state.savedMarketProductIds.filter((id) => String(id) !== productId);
-        }
-        if (!actual) state.savedMarketProducts = state.savedMarketProducts.filter((candidate) => String(candidate.id) !== productId);
-        toast(actual ? "Product saved for later." : "Product removed from saved items.", "success");
-      } catch (error) {
-        if (wasSaved) {
-          state.savedMarketProductIds = [...new Set([...state.savedMarketProductIds, productId])];
-          if (!state.savedMarketProducts.some((candidate) => String(candidate.id) === productId)) state.savedMarketProducts.unshift({...product});
-        } else {
-          state.savedMarketProductIds = state.savedMarketProductIds.filter((id) => String(id) !== productId);
-          state.savedMarketProducts = state.savedMarketProducts.filter((candidate) => String(candidate.id) !== productId);
-        }
-        throw error;
-      } finally { paint(); }
-      return;
-    }
     if (a === "skills-category") { state.skillCategory=actionEl.dataset.category || "all";paint();return; }
-    if (a === "onboarding-next") { const step=state.sellerOnboardingStep; if(step===2 && !document.getElementById("seller-agreement")?.checked){toast("Please accept the seller standards.","error");return;} if(step===3){const f=document.getElementById("seller-details-form");const d=f ? Object.fromEntries(new FormData(f)) : {};state.sellerDraft={...state.sellerDraft,...d,agreed:true};saveSellerDraft(); if(state.myStore) await api.updateStoreProfile({storeId:state.myStore.id,name:String(d.name).trim(),description:String(d.description || "").trim(),locationText:String(d.location || "").trim()}); else {const r=await api.createStore({name:String(d.name).trim(),description:String(d.description || "").trim(),category:String(d.category || "").trim(),location:String(d.location || "").trim()});state.sellerDraft.storeId=r?.storeId || "";} await loadBusinessWorkspace();go("business");return;} state.sellerOnboardingStep++;paint();return; }
+    if (a === "onboarding-next") { const step=state.sellerOnboardingStep; if(step===2 && !document.getElementById("seller-agreement")?.checked){toast("Please accept the seller standards.","error");return;} if(step===3){const f=document.getElementById("seller-details-form");const d=f ? Object.fromEntries(new FormData(f)) : {};state.sellerDraft={...state.sellerDraft,...d,agreed:true};saveSellerDraft(); if(state.myStore) await api.updateStoreProfile({storeId:state.myStore.id,name:String(d.name).trim(),description:String(d.description || "").trim(),locationText:String(d.location || "").trim()}); else {const r=await api.createStore({name:String(d.name).trim(),description:String(d.description || "").trim(),category:String(d.category || "").trim(),location:String(d.location || "").trim()});state.sellerDraft.storeId=r?.storeId || "";} await loadBusinessWorkspace(true);go("business");return;} state.sellerOnboardingStep++;paint();return; }
     if (a === "onboarding-back") { if(state.sellerOnboardingStep>0){state.sellerOnboardingStep--;paint();}return; }
-    if (a === "skill-onboarding-next") { const step=state.skillOnboardingStep;const f=document.getElementById("skill-details-form");if(f){const d=Object.fromEntries(new FormData(f));state.skillDraft={...state.skillDraft,...d};saveSkillDraft();} if(step===3){const d=state.skillDraft;const categories=String(d.category || "").trim();await api.upsertSkillProfile({headline:String(d.headline || "").trim(),bio:String(d.bio || "").trim(),locationText:String(d.locationText || "").trim(),remote:String(d.remote) !== "false",yearsExperience:Math.max(0,Math.min(80,Math.floor(Number(d.yearsExperience || 0)))),categories:categories ? [categories] : []}); if(d.listingTitle && d.listingDescription && d.category){await api.createSkillListing({title:String(d.listingTitle).trim(),description:String(d.listingDescription).trim(),categoryId:String(d.category),currency:String(d.currency || "NGN"),priceFromMinor:d.priceFromMinor === "" ? null : safeMinor(d.priceFromMinor),deliveryTimeDays:d.deliveryTimeDays === "" ? null : Math.max(1,Math.min(365,Math.floor(Number(d.deliveryTimeDays)))),tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean)});} state.skillDraft={...state.skillDraft,skillProfileUid:state.user.uid};saveSkillDraft();toast("Provider profile saved.","success");await loadSkillWorkspace();go("skill-profile");return;} state.skillOnboardingStep++;paint();return; }
+    if (a === "skill-onboarding-next") { const step=state.skillOnboardingStep;const f=document.getElementById("skill-details-form");if(f){const d=Object.fromEntries(new FormData(f));state.skillDraft={...state.skillDraft,...d};saveSkillDraft();} if(step===3){const d=state.skillDraft;const categories=String(d.category || "").trim();await api.upsertSkillProfile({headline:String(d.headline || "").trim(),bio:String(d.bio || "").trim(),locationText:String(d.locationText || "").trim(),remote:String(d.remote) !== "false",yearsExperience:Math.max(0,Math.min(80,Math.floor(Number(d.yearsExperience || 0)))),categories:categories ? [categories] : []}); if(d.listingTitle && d.listingDescription && d.category){await api.createSkillListing({title:String(d.listingTitle).trim(),description:String(d.listingDescription).trim(),categoryId:String(d.category),currency:String(d.currency || "NGN"),priceFromMinor:d.priceFromMinor === "" ? null : safeMinor(d.priceFromMinor),deliveryTimeDays:d.deliveryTimeDays === "" ? null : Math.max(1,Math.min(365,Math.floor(Number(d.deliveryTimeDays)))),tags:String(d.tags || "").split(",").map((x)=>x.trim()).filter(Boolean)});} state.skillDraft={...state.skillDraft,skillProfileUid:state.user.uid};saveSkillDraft();toast("Provider profile saved.","success");await loadSkillWorkspace(true);go("skill-profile");return;} state.skillOnboardingStep++;paint();return; }
     if (a === "skill-onboarding-back") { if(state.skillOnboardingStep>0){state.skillOnboardingStep--;paint();}return; }
     if (a === "submit-skill-listing") {
       const d = Object.fromEntries(new FormData(document.getElementById("skill-listing-form")));
@@ -1992,8 +2006,8 @@ document.addEventListener("click", async (e) => {
       resetPendingPhoto("skill");
       closeModal();
       toast(id ? "Listing updated." : "Listing published.","success");
-      await loadSkillWorkspace();
-      await loadSkills();
+      await loadSkillWorkspace(true);
+      await loadSkills(true);
       paint();
       return;
     }
@@ -2002,18 +2016,32 @@ document.addEventListener("click", async (e) => {
 
 document.addEventListener("change", async (e) => {
   const input = e.target;
-  if (input?.dataset?.action === "market-sort") {
-    state.marketSort = ["newest", "price-low", "price-high"].includes(input.value) ? input.value : "newest";
+  if (input?.matches?.('[data-action="market-sort"]')) {
+    state.marketSort = ["recommended","newest","price_low","price_high"].includes(input.value) ? input.value : "recommended";
     paint();
     return;
   }
   if (input?.id === "profile-photo-input" && input.files?.[0]) {
-    state.pendingProfilePhotoFile = input.files[0];
+    const original = input.files[0];
     const box = document.getElementById("profile-photo-preview");
-    if (box) {
+    try {
+      if (!original.type.startsWith("image/")) throw new Error("Choose an image for your profile photo.");
+      const optimized = await prepareMediaFile(original, undefined, "image");
+      if (optimized.size > MAX_MEDIA_BYTES) throw new Error("The profile image is still larger than 2 MiB after optimization.");
+      const usage = await api.getMyMediaDailyUsage({requestedBytes: optimized.size});
+      const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
+      if (optimized.size > remaining) throw new Error(`The shared 2 MiB rolling 24-hour allowance has ${formatMiB(remaining)} remaining. ${quotaRetryCopy(usage?.retryAt)} You can still update text fields.`);
+      state.pendingProfilePhotoFile = optimized;
       if (state.pendingProfilePhotoPreview) URL.revokeObjectURL(state.pendingProfilePhotoPreview);
-      state.pendingProfilePhotoPreview = URL.createObjectURL(input.files[0]);
-      box.innerHTML = `<img src="${state.pendingProfilePhotoPreview}" alt="Profile photo preview">`;
+      state.pendingProfilePhotoPreview = URL.createObjectURL(optimized);
+      const saved = Math.max(0, original.size - optimized.size);
+      const pct = original.size ? (saved / original.size * 100) : 0;
+      state.pendingProfilePhotoInfo = `${formatKB(original.size)} → ${formatKB(optimized.size)}${saved ? ` · saved ${pct.toFixed(1)}%` : " · already optimized"}`;
+      if (box) box.innerHTML = `<img src="${state.pendingProfilePhotoPreview}" alt="Optimized profile photo preview"><small class="media-compression-result">${esc(state.pendingProfilePhotoInfo)}</small>`;
+    } catch (error) {
+      state.pendingProfilePhotoFile = null;
+      input.value = "";
+      toast(error.message || "Profile photo could not be optimized.", "error");
     }
   }
   if ((input?.id === "post-media" || input?.id === "edit-post-media") && input.files) {
@@ -2078,23 +2106,67 @@ document.addEventListener("change", async (e) => {
     }
   }
 
-  if (input?.id === "product-photo-input" && input.files?.[0]) {
-    const file = input.files[0];
-    if (!file.type.startsWith("image/")) { input.value = ""; toast("Choose an image file.", "error"); return; }
-    if (state.pendingProductPhotoPreview) URL.revokeObjectURL(state.pendingProductPhotoPreview);
-    state.pendingProductPhotoFile = file;
-    state.pendingProductPhotoPreview = URL.createObjectURL(file);
+  if (input?.id === "product-photo-input" && input.files) {
     const box = document.getElementById("product-photo-preview");
-    if (box) box.innerHTML = `<img src="${esc(state.pendingProductPhotoPreview)}" alt="Selected product photo">`;
+    const results = document.getElementById("product-photo-results");
+    try {
+      const originals = Array.from(input.files || []);
+      if (!originals.length) return;
+      if (originals.length > 8) throw new Error("Choose up to eight product photos at a time.");
+      if (originals.some((file) => !file.type.startsWith("image/"))) throw new Error("Choose image files only for a product gallery.");
+      if (Array.isArray(state.pendingProductPhotoPreviews)) state.pendingProductPhotoPreviews.forEach((url)=>{if(url)URL.revokeObjectURL(url);});
+      state.pendingProductPhotoPreviews=[];
+      state.pendingProductPhotoFiles=[];
+      if (results) results.innerHTML = `<div class="media-processing" role="status">${icon("spinner",18)} Optimizing product photos…</div>`;
+      const prepared=[];
+      for (const original of originals) {
+        const optimized=await prepareMediaFile(original, undefined, "image");
+        if(optimized.size>MAX_MEDIA_BYTES) throw new Error(`${original.name} remains larger than 2 MiB after compression.`);
+        prepared.push({original,optimized});
+      }
+      const total=prepared.reduce((sum,item)=>sum+item.optimized.size,0);
+      if(total>DAILY_MEDIA_BYTES) throw new Error(`These photos total ${formatMiB(total)}. The shared rolling 24-hour allowance is 2 MiB; choose fewer or smaller photos.`);
+      const usage=await api.getMyMediaDailyUsage({requestedBytes:total});
+      const remaining=Math.max(0,Number(usage?.remainingBytes??DAILY_MEDIA_BYTES));
+      if(total>remaining) throw new Error(`Only ${formatMiB(remaining)} remains in the shared 2 MiB rolling 24-hour media allowance. ${quotaRetryCopy(usage?.retryAt)}`);
+      state.pendingProductPhotoFiles=prepared.map((item)=>item.optimized);
+      state.pendingProductPhotoFile=state.pendingProductPhotoFiles[0]||null;
+      const imageCards=prepared.map(({original,optimized})=>{
+        const url=URL.createObjectURL(optimized);state.pendingProductPhotoPreviews.push(url);
+        const saved=Math.max(0,original.size-optimized.size);const pct=original.size?(saved/original.size*100):0;
+        return `<figure class="selected-media"><img src="${esc(url)}" alt="Optimized preview of ${esc(original.name)}" decoding="async"><figcaption><strong>${esc(original.name)}</strong><small>${formatKB(original.size)} → ${formatKB(optimized.size)}${saved?` · saved ${pct.toFixed(1)}%`:" · already optimized"}</small></figcaption></figure>`;
+      }).join("");
+      if(box) box.innerHTML=imageCards;
+      if(results) results.innerHTML=`<p class="media-quota-note">Selected ${prepared.length} photo(s) · ${formatMiB(total)} optimized · ${formatMiB(remaining-total)} remaining before upload. The server checks the allowance again during each upload.</p>`;
+    } catch (error) {
+      state.pendingProductPhotoFiles=[];state.pendingProductPhotoFile=null;
+      if(Array.isArray(state.pendingProductPhotoPreviews))state.pendingProductPhotoPreviews.forEach((url)=>URL.revokeObjectURL(url));state.pendingProductPhotoPreviews=[];
+      if(box)box.innerHTML="";if(results)results.textContent="";input.value="";
+      toast(error.message||"Product photos could not be optimized.","error");
+    }
   }
   if (input?.id === "skill-photo-input" && input.files?.[0]) {
-    const file = input.files[0];
-    if (!file.type.startsWith("image/")) { input.value = ""; toast("Choose an image file.", "error"); return; }
-    if (state.pendingSkillPhotoPreview) URL.revokeObjectURL(state.pendingSkillPhotoPreview);
-    state.pendingSkillPhotoFile = file;
-    state.pendingSkillPhotoPreview = URL.createObjectURL(file);
-    const box = document.getElementById("skill-photo-preview");
-    if (box) box.innerHTML = `<img src="${esc(state.pendingSkillPhotoPreview)}" alt="Selected service photo">`;
+    const original = input.files[0];
+    try {
+      if (!original.type.startsWith("image/")) throw new Error("Choose an image file for the service.");
+      const optimized = await prepareMediaFile(original, undefined, "image");
+      if (optimized.size > MAX_MEDIA_BYTES) throw new Error("The service photo is still larger than 2 MiB after compression.");
+      const usage = await api.getMyMediaDailyUsage({requestedBytes: optimized.size});
+      const remaining = Math.max(0, Number(usage?.remainingBytes ?? DAILY_MEDIA_BYTES));
+      if (optimized.size > remaining) throw new Error(`The shared 2 MiB rolling 24-hour allowance has ${formatMiB(remaining)} remaining. ${quotaRetryCopy(usage?.retryAt)}`);
+      if (state.pendingSkillPhotoPreview) URL.revokeObjectURL(state.pendingSkillPhotoPreview);
+      state.pendingSkillPhotoFile = optimized;
+      state.pendingSkillPhotoPreview = URL.createObjectURL(optimized);
+      const saved = Math.max(0, original.size - optimized.size);
+      const pct = original.size ? (saved / original.size * 100) : 0;
+      state.pendingSkillPhotoInfo = `${formatKB(original.size)} → ${formatKB(optimized.size)}${saved ? ` · saved ${pct.toFixed(1)}%` : " · already optimized"}`;
+      const box = document.getElementById("skill-photo-preview");
+      if (box) box.innerHTML = `<img src="${esc(state.pendingSkillPhotoPreview)}" alt="Optimized service photo"><small class="media-compression-result">${esc(state.pendingSkillPhotoInfo)}</small>`;
+    } catch (error) {
+      state.pendingSkillPhotoFile = null;
+      input.value = "";
+      toast(error.message || "Service photo could not be optimized.", "error");
+    }
   }
   if(input?.id === "moment-photo" && input.files?.[0]) {
     const original = input.files[0];
@@ -2139,12 +2211,11 @@ document.addEventListener("submit", async (e) => {
     if(f.id === "signin-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));await persistenceReady;try{await signInWithEmailAndPassword(auth,String(d.email).trim(),String(d.password));}catch(err){console.error("[Marvel Chat] email sign-in",err?.code,err?.message);throw err;}return;}
     if(f.id === "forgot-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));await sendPasswordResetEmail(auth,String(d.email).trim());toast("If an account matches that email, a reset link is on its way.","success");return;}
     if(f.id === "message-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));const text=String(d.text || "").trim();if(!text)return;await api.sendMessage({threadId:state.activeThreadId,text});f.reset();return;}
-    if(f.id === "edit-message-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));const text=String(d.text || "").trim();if(!text){toast("Message cannot be empty.","error");return;}await api.editMessage({threadId:state.activeThreadId,messageId:String(d.messageId || ""),text});closeModal();toast("Message updated.","success");return;}
     if(f.id === "home-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();if(state.searchQuery.length<2){state.homeSearchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:"people_posts"});state.homeSearchResults=Array.isArray(r?.results)?r.results.filter((item)=>["user","person","post"].includes(String(item?.type||"").toLowerCase())):[];paint();return;}
     if(f.id === "chat-person-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.chatSearchQuery=String(d.query || "").trim();if(state.chatSearchQuery.length<2){state.chatSearchResults=[];paint();return;}const r=await api.search({query:state.chatSearchQuery,scope:"users"});state.chatSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "skills-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.skillsSearchQuery=String(d.query || "").trim();paint();return;}
     if(f.id === "search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.searchScope=String(d.scope || "all");if(state.searchQuery.length<2){state.searchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:state.searchScope});state.searchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
-    if(f.id === "market-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.marketShopFilter="";state.marketShowSaved=false;await loadMarket();paint();return;}
+    if(f.id === "market-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();await loadMarket();paint();return;}
   } catch(err) { e.preventDefault(); console.error(err?.code,err?.message); toast(friendlyError(err),"error"); }
 });
 
@@ -2155,19 +2226,6 @@ document.addEventListener("keydown", (e) => {
   if(e.target.matches(".composer textarea") && e.key === "Enter" && !e.shiftKey){e.preventDefault();e.target.form?.requestSubmit();}
 });
 
-window.addEventListener("beforeinstallprompt", (event) => {
-  // Installation is user-initiated from the menu; never interrupt first visit.
-  event.preventDefault();
-  deferredInstallPrompt = event;
-  state.installAvailable = true;
-});
-window.addEventListener("appinstalled", () => {
-  deferredInstallPrompt = null;
-  state.installAvailable = false;
-  toast("Marvel Chat is installed on this device.", "success");
-});
-window.addEventListener("offline", () => { if (state.isOffline) return; state.isOffline = true; if (state.user) toast("You’re offline. Live updates and uploads need a connection.","error"); });
-window.addEventListener("online", () => { if (!state.isOffline) return; state.isOffline = false; if (state.user) toast("You’re back online.","success"); });
 if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
 app.innerHTML=`<main class="splash"><section class="splash-card"><div class="brand-mark brand-mark-xl"><img src="./assets/brand/icon-512.png" alt="Marvel Chat"></div><h1>Marvel Chat</h1><p>by Davonium Technologies</p><div class="loader"><span></span></div></section></main>`;
 
@@ -2175,7 +2233,6 @@ onAuthStateChanged(auth, async (user) => {
   clearSubscriptions();
   const previousUid = state.user?.uid || "";
   state.user = user;
-  state.pushEnabled = readPushPreference(user?.uid);
   if (previousUid !== (user?.uid || "")) { stopDiscoveryBannerTimer(); discoveryBannerVisibleForUser = null; }
   state.activeThreadId = null;
   state.messages = [];
@@ -2187,6 +2244,8 @@ onAuthStateChanged(auth, async (user) => {
     state.route = "home"; authMode = "welcome"; paint(); return;
   }
   if (previousUid !== user.uid) {
+    state.profileLoadedAt = 0; state.threadsLoadedAt = 0; state.notificationsLoadedAt = 0;
+    state.marketLoaded = false; state.marketCacheAt = 0; state.skillsLoadedAt = 0; state.businessLoadedAt = 0;
     state.posts = []; state.moments = []; state.homeCursor = null; state.homeHasMore = false; state.homeViewerFollowsAny = null; state.homeLoaded = false; state.homeError = "";
     state.savedPosts = []; state.savedPostsCursor = null; state.savedPostsHasMore = false; state.savedPostsLoaded = false;
     state.notifications = []; state.unreadNotifications = 0; state.followingIds = []; state.followStats = {followersCount: 0, followingCount: 0, postCount: 0};
