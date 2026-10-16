@@ -422,19 +422,88 @@ html[data-theme="dark"]{
 @media(max-width:560px){.discovery-overlay{padding:10px max(10px,env(safe-area-inset-right)) max(10px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));}.discovery-banner{max-height:calc(100dvh - 20px);padding:22px 17px;border-radius:23px;gap:17px}.discovery-banner-options{grid-template-columns:1fr}.discovery-option{min-height:78px;grid-template-columns:54px minmax(0,1fr) 18px;padding:10px}.discovery-option-art{width:54px;height:54px}.discovery-banner-intro h2{font-size:clamp(1.65rem,8vw,2.2rem)}.moment-ring{width:102px;height:102px;padding:6px}.moment-card{min-width:108px}.post-carousel-slide{aspect-ratio:4/3;max-height:55svh;min-height:0}.legal-modal-hero{grid-template-columns:48px minmax(0,1fr);padding:18px 14px}.legal-modal-mark{width:48px;height:48px;min-width:48px}.legal-modal-switcher{gap:6px}.legal-modal-switcher button{font-size:.7rem;padding:7px 9px;}}
 @media(prefers-reduced-motion:reduce){.moment-card.has-moment .moment-ring,.discovery-overlay,.discovery-banner-brand img{animation:none!important;transition:none!important}.discovery-banner::before,.discovery-banner-glimmer,.discovery-art-orbit,.discovery-art-spark{animation:none!important}}
 
+/* Integration audit: small, responsive interaction upgrades without replacing the production design. */
+.profile-stats .profile-stat{display:block;text-align:left;color:var(--text);font:inherit;cursor:pointer;transition:border-color .15s ease,transform .15s ease;}
+.profile-stats button.profile-stat:hover,.profile-stats button.profile-stat:focus-visible{border-color:var(--accent);transform:translateY(-1px);outline:none;}
+.profile-follow-list{display:grid;gap:5px;max-height:min(60dvh,520px);overflow:auto;overscroll-behavior:contain;}
+.profile-follow-row{display:flex;align-items:center;gap:10px;width:100%;min-width:0;padding:10px;border:1px solid var(--line);border-radius:13px;background:var(--surface);color:var(--text);text-align:left;}
+.profile-follow-row>span{display:grid;gap:2px;flex:1;min-width:0;}
+.profile-follow-row strong{overflow-wrap:anywhere;font-size:.86rem;}
+.profile-follow-row small{color:var(--muted);font-size:.72rem;}
+.profile-follow-row>.icon{color:var(--accent);}
 
-/* Production integration: corporate support, PWA install/update and offline status. */
-.menu-external{color:var(--text);text-decoration:none;}
-.menu-external:hover{background:var(--surface2);}
-.company-links{display:flex;flex-wrap:wrap;gap:9px 14px;padding:14px 4px 2px;border-top:1px solid var(--line);font-size:.78rem;font-weight:800;}
-.company-links a,.company-contact-links a{color:var(--accent);text-decoration:none;}
-.company-links a:hover,.company-contact-links a:hover{text-decoration:underline;}
-.company-contact-links{display:flex;flex-wrap:wrap;align-items:center;gap:8px 14px;margin-top:13px;padding-top:12px;border-top:1px solid var(--line);font-size:.78rem;line-height:1.5;}
-.connection-status,.pwa-update-status{position:fixed;z-index:5000;left:max(10px,env(safe-area-inset-left));right:max(10px,env(safe-area-inset-right));display:flex;align-items:center;justify-content:center;gap:10px;padding:10px 14px;border:1px solid rgba(255,255,255,.25);border-radius:14px;background:linear-gradient(110deg,#4f46e5,#a21caf,#db2777,#0f766e);color:white;box-shadow:0 9px 28px rgba(28,18,60,.24);font-size:.78rem;font-weight:750;line-height:1.4;}
-.connection-status{top:max(8px,env(safe-area-inset-top));}
-.pwa-update-status{top:max(8px,env(safe-area-inset-top));justify-content:space-between;}
-.connection-status[hidden],.pwa-update-status[hidden]{display:none!important;}
-.connection-status-dot{width:9px;height:9px;min-width:9px;border-radius:50%;background:#fbbf24;box-shadow:0 0 0 4px rgba(251,191,36,.2);}
-.pwa-update-status button{border:1px solid rgba(255,255,255,.55);border-radius:999px;padding:7px 10px;background:rgba(255,255,255,.14);color:white;font-size:.75rem;font-weight:900;white-space:nowrap;}
-@media(max-width:480px){.connection-status,.pwa-update-status{font-size:.72rem;padding:9px 10px;border-radius:12px}.company-contact-links{gap:7px 10px;font-size:.72rem}.company-links{font-size:.75rem}}
-@media(prefers-reduced-motion:reduce){.connection-status,.pwa-update-status{scroll-behavior:auto}}
+/* Chat: stable fixed-height conversation viewport and a composer anchored above device safe area. */
+.conversation{height:calc(100dvh - 74px);min-height:0;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden;padding-top:14px;padding-bottom:max(8px,env(safe-area-inset-bottom));}
+.conversation .messages{min-height:0;overscroll-behavior-y:contain;scrollbar-gutter:stable;}
+.conversation .composer{position:sticky;bottom:0;z-index:5;flex:0 0 auto;padding:10px 0 max(8px,env(safe-area-inset-bottom));background:var(--bg);}
+.conversation .composer textarea{min-width:0;max-height:28dvh;min-height:46px;line-height:1.45;overflow-y:auto;}
+.chat-list-filters{display:flex;flex-wrap:wrap;gap:8px;margin:0 0 12px;}
+.threads{display:grid;gap:7px;}
+.thread-entry{position:relative;display:grid;grid-template-columns:minmax(0,1fr) 40px;align-items:stretch;gap:5px;padding:6px;border:1px solid var(--line);border-radius:15px;background:var(--surface);}
+.thread-entry .thread-main{width:100%;min-width:0;display:flex;align-items:center;gap:10px;padding:8px;border:0;border-radius:10px;background:transparent;box-shadow:none;text-align:left;color:var(--text);}
+.thread-copy{display:grid;gap:4px;flex:1;min-width:0;}
+.thread-copy strong,.thread-copy small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.thread-copy small{color:var(--muted);font-size:.74rem;}
+.thread-meta{color:var(--muted);font-size:.67rem;white-space:nowrap;}
+.thread-pin-mark{color:#d69e00;}
+.thread-options-button{align-self:center;width:36px;height:36px;border-radius:10px;background:var(--surface2);color:var(--muted);display:grid;place-items:center;}
+.thread-option-panel{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;padding:7px;border-top:1px solid var(--line);}
+.thread-option-panel button{min-height:34px;padding:7px 10px;border:1px solid var(--line);border-radius:9px;background:var(--surface2);color:var(--text);font-size:.76rem;font-weight:750;}
+.message-more{align-self:flex-start;border:1px solid currentColor;border-radius:8px;padding:4px 8px;opacity:.78;}
+
+/* Market: compact controls, saved state, and cards remain usable on narrow screens. */
+.market-tool-row{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin:14px 0 4px;}
+.market-sort-label{display:flex;align-items:center;gap:7px;color:var(--muted);font-size:.78rem;font-weight:750;}
+.market-sort-label select{max-width:100%;min-height:38px;padding:7px 9px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--text);}
+.product-card{display:flex;flex-direction:column;min-width:0;cursor:default;}
+.product-card-main{width:100%;min-width:0;background:transparent;color:var(--text);text-align:left;padding:0;}
+.product-cover{height:auto;aspect-ratio:4/3;min-height:0;overflow:hidden;}
+.product-cover img{width:100%;height:100%;object-fit:cover;}
+.product-info{min-width:0;overflow-wrap:anywhere;}
+.product-info p{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:3;overflow:hidden;}
+.market-save-button{display:flex;align-items:center;justify-content:center;gap:6px;min-height:38px;margin:0 12px 12px;padding:8px 10px;border:1px solid var(--line);border-radius:11px;background:var(--surface2);color:var(--muted);font-size:.78rem;font-weight:800;}
+.market-save-button.is-saved{border-color:rgba(214,158,0,.38);background:rgba(234,179,8,.15);color:#b58100;}
+html[data-theme="dark"] .market-save-button.is-saved{color:#facc15;}
+
+/* Story ring: quiet, visible outline when no Moment exists; spectrum glow only for active Moments. */
+.moment-ring{width:112px;height:112px;padding:6px;filter:none;}
+.moment-card.no-moment .moment-ring{background:var(--surface);border:3px solid var(--accent);box-shadow:0 0 0 2px var(--surface),0 0 0 4px color-mix(in srgb,var(--accent) 70%,#ec4899);filter:none;}
+.moment-card.no-moment .moment-avatar{width:100%;height:100%;padding:2px;background:var(--surface);}
+.moment-card.no-moment .moment-avatar .avatar{width:100%;height:100%;}
+.moment-card.has-moment .moment-ring.has-live-moment{background:conic-gradient(from 0deg,#ffb52e,#f43f9a,#8b5cf6,#18b9ff,#22c55e,#ffb52e);animation:moment-spectrum-glow 3.2s linear infinite;}
+.moment-card.no-moment .moment-ring{animation:none!important;}
+
+/* Offline state and company links inherit current light/dark theme. */
+.offline-status{position:sticky;top:0;z-index:40;padding:8px 14px;background:#fff1c2;color:#63440a;border-bottom:1px solid rgba(153,102,0,.2);text-align:center;font-size:.75rem;font-weight:750;}
+html[data-theme="dark"] .offline-status{background:#342b16;color:#ffe3a0;}
+.legal-corporate-nav{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:7px;margin-top:6px;}
+.legal-corporate-nav a{display:inline-flex;align-items:center;min-height:32px;padding:6px 9px;border:1px solid rgba(69,48,113,.16);border-radius:999px;background:rgba(255,255,255,.72);color:#45306e;text-decoration:none;font-size:.7rem;font-weight:800;}
+@media(max-width:680px){
+  .conversation{height:calc(100dvh - 68px);padding-top:10px;padding-bottom:max(5px,env(safe-area-inset-bottom));}
+  .conversation-head{min-height:46px;}
+  .conversation .messages{padding-bottom:10px;}
+  .thread-entry{gap:3px;padding:4px;}
+  .thread-entry .thread-main{gap:8px;padding:6px;}
+  .thread-meta{font-size:.62rem;}
+  .profile-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;}
+  .profile-stats>div,.profile-stats>button{min-width:0;padding:10px 9px;}
+  .profile-stats span{font-size:.66rem;}
+  .market-tool-row{align-items:stretch;}
+  .market-sort-label{width:100%;justify-content:space-between;}
+  .market-sort-label select{flex:1;max-width:70%;}
+  .product-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;}
+  .product-info{padding:10px;}
+  .product-info h3{font-size:.84rem;}
+  .product-info p{font-size:.73rem;}
+  .market-save-button{margin:0 8px 8px;min-height:35px;font-size:.72rem;}
+}
+@media(max-width:380px){
+  .product-grid{grid-template-columns:minmax(0,1fr);}
+  .product-cover{aspect-ratio:16/9;}
+  .thread-meta{display:none;}
+  .profile-stats{gap:5px;}
+}
+@media(prefers-reduced-motion:reduce){
+  .moment-card.has-moment .moment-ring.has-live-moment{animation:none!important;}
+  .profile-stats button.profile-stat{transition:none!important;}
+}

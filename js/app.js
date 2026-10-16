@@ -44,6 +44,7 @@ const SKILL_CATEGORIES = [
 ];
 let authMode = "welcome";
 let googleSignInPending = false;
+let deferredInstallPrompt = null;
 let homePaginationObserver = null;
 let catalogueMediaObserver = null;
 const carouselHydrationTimers = new Map();
@@ -226,8 +227,11 @@ function sideMenu() {
       <button class="menu-item" type="button" data-action="legal-terms">${icon("file")}Terms</button>
       <button class="menu-item" type="button" data-action="legal-privacy">${icon("lock")}Privacy</button>
       <button class="menu-item" type="button" data-action="legal-community">${icon("shield")}Community Guidelines</button>
-      <a class="menu-item menu-external" href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">${icon("grid")}Davonium Technologies website ↗</a>
-      <a class="menu-item menu-external" href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">${icon("chat")}Contact the company ↗</a>
+      <div class="menu-sep"></div>
+      <button class="menu-item" type="button" data-action="install-app">Install Marvel Chat</button>
+      <button class="menu-item" type="button" data-action="check-app-update">Check for app update</button>
+      <a class="menu-item menu-anchor" href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">Davonium Technologies website ↗</a>
+      <a class="menu-item menu-anchor" href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">Contact the company ↗</a>
       <div class="menu-foot">Davonium Technologies · © 2026</div>
       <button class="menu-item menu-sign-out" type="button" data-action="sign-out">${icon("logout")}Sign out</button>
     </aside>
@@ -235,7 +239,8 @@ function sideMenu() {
 }
 
 function shell(content, noBottom = false) {
-  return `<div class="app-shell">${topbar()}<main class="main-scroll">${content}</main>${noBottom ? "" : bottomBar()}</div>`;
+  const offline = state.isOffline ? `<div class="offline-status" role="status" aria-live="polite">You’re offline. Cached app pages may be available; sending, uploading and live updates need a connection.</div>` : "";
+  return `<div class="app-shell">${topbar()}<main class="main-scroll">${offline}${content}</main>${noBottom ? "" : bottomBar()}</div>`;
 }
 function emptyState(title, text, action = "", label = "") {
   return `<div class="empty-state"><div class="empty-icon">${icon("spark",19)}</div><strong>${esc(title)}</strong><span>${esc(text)}</span>${action ? `<button class="btn btn-secondary" type="button" data-action="${esc(action)}">${esc(label)}</button>` : ""}</div>`;
@@ -619,7 +624,12 @@ async function refreshNotificationSummary() {
 
 async function loadThreads() {
   const s = await getDocs(query(collection(db,"chatThreads"), where("participantIds","array-contains",state.user.uid), limit(50)));
-  state.threads = s.docs.map((d) => ({id:d.id,...d.data()})).sort((a,b) => stamp(b.updatedAt || b.lastMessageAt) - stamp(a.updatedAt || a.lastMessageAt));
+  state.threads = s.docs.map((d) => ({id:d.id,...d.data()})).sort((a,b) => {
+    const aPinned = Array.isArray(a.pinnedUids) && a.pinnedUids.includes(state.user.uid);
+    const bPinned = Array.isArray(b.pinnedUids) && b.pinnedUids.includes(state.user.uid);
+    if (aPinned !== bPinned) return aPinned ? -1 : 1;
+    return stamp(b.updatedAt || b.lastMessageAt) - stamp(a.updatedAt || a.lastMessageAt);
+  });
 }
 
 async function findOrCreateDirectThread(targetUid, profile) {
@@ -671,15 +681,22 @@ async function loadSkillWorkspace() {
 }
 
 async function loadMarket() {
-  const [r, categorySnap, storeSnap] = await Promise.all([
+  const [r, categorySnap, storeSnap, savedResult] = await Promise.all([
     api.discoverMarketProducts({query: state.searchQuery || "", scope:"all"}),
     getDocs(query(collection(db,"productCategories"), where("status","==","active"), limit(50))).catch(() => ({docs:[]})),
-    getDocs(query(collection(db,"stores"), where("ownerUid","==",state.user.uid), limit(1))).catch(() => ({docs:[]}))
+    getDocs(query(collection(db,"stores"), where("ownerUid","==",state.user.uid), limit(1))).catch(() => ({docs:[]})),
+    api.getMySavedMarketProducts({limit: 40}).catch((error) => {
+      console.debug("[Marvel Chat] saved Market list unavailable", error?.code || error?.message);
+      return {productIds: [], products: []};
+    })
   ]);
   state.products = Array.isArray(r?.results) ? r.results : [];
   state.marketCategories = categorySnap.docs.map((d) => ({id:d.id,...d.data()}));
   state.myStore = storeSnap.docs.length ? {id:storeSnap.docs[0].id,...storeSnap.docs[0].data()} : state.myStore;
-  void Promise.all(state.products.slice(0, 8).map((item) => hydrateMarketProductMedia(item))).then(() => { if (state.route === "market") paint(); });
+  state.savedMarketProductIds = Array.isArray(savedResult?.productIds) ? savedResult.productIds.map(String) : [];
+  state.savedMarketProducts = Array.isArray(savedResult?.products) ? savedResult.products : [];
+  const catalogue = state.marketShowSaved ? state.savedMarketProducts : state.products;
+  void Promise.all(catalogue.slice(0, 8).map((item) => hydrateMarketProductMedia(item))).then(() => { if (state.route === "market") paint(); });
 }
 
 async function loadBusinessWorkspace() {
@@ -769,7 +786,7 @@ function categoryChips(kind, selected) {
 function momentCard(m, own = false) {
   const label = own ? "Your Moment" : (m.authorSnapshot?.displayName || m.author?.displayName || m.displayName || m.username || "Following");
   const person = own ? (state.profile || state.user || m) : (m.authorSnapshot || m.author || m);
-  return `<button class="moment-card ${own ? "own has-moment" : "has-moment"}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring"><div class="moment-avatar">${avatar(person,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
+  return `<button class="moment-card ${own ? "own has-moment" : "has-moment"}" type="button" data-action="view-moment" data-id="${esc(m.id)}"><div class="moment-ring has-live-moment"><div class="moment-avatar">${avatar(person,"md",true)}</div>${own ? `<span class="moment-plus">${icon("plus",12)}</span>` : ""}</div><span class="moment-label">${esc(label)}</span></button>`;
 }
 
 function renderPostCard(p) {
@@ -853,7 +870,7 @@ function renderHome() {
     ? `<div class="feed-loader" role="status">${icon("spinner",18)} Loading more posts…</div>`
     : state.homeHasMore ? `<div id="home-page-sentinel" class="pagination-sentinel"><button class="btn btn-secondary" type="button" data-action="load-more-home">Load more posts</button></div>`
     : state.homeLoaded && state.homeViewerFollowsAny === false
-      ? `<div class="feed-follow-prompt"><strong>${state.posts.length >= 6 ? "You’ve seen the latest six public posts." : "You’ve reached the end of the available public posts."}</strong><p>Follow people to see their new posts and Moments. Search for a person or post to find someone to follow.</p><button class="btn btn-primary" type="button" data-action="route-search">Search people and posts</button></div>`
+      ? `<div class="feed-follow-prompt"><strong>You’re caught up with the public posts currently available.</strong><p>Follow people to prioritize their new posts and Moments. You can keep exploring public community updates or search for someone to follow.</p><button class="btn btn-primary" type="button" data-action="route-search">Search people and posts</button></div>`
       : state.homeLoaded && state.posts.length ? `<p class="end-of-feed">You’re all caught up.</p>` : "";
   return `<section class="screen home-screen">
     ${renderDiscoveryBanner()}
@@ -879,10 +896,27 @@ function renderChat() {
   if (state.activeThreadId) {
     const t = state.threads.find((x) => x.id === state.activeThreadId) || {};
     const p = peer(t);
-    return `<section class="screen conversation"><header class="conversation-head"><button class="icon-btn" type="button" data-action="close-thread" aria-label="Back">${icon("back")}</button>${avatar(p,"sm",true)}<div class="grow"><strong>${esc(p.displayName || p.username || "Conversation")}</strong><span>${esc(p.username ? `@${p.username}` : "Private conversation")}</span></div></header><div class="messages">${state.messages.length ? state.messages.map((m) => `<div class="message-row ${m.senderUid === state.user.uid ? "own" : ""}"><div class="bubble"><div>${esc(m.status === "deleted_for_everyone" ? "Message deleted" : (m.text || ""))}</div><small>${when(m.createdAt)}</small>${m.senderUid === state.user.uid && m.status !== "deleted_for_everyone" ? `<button class="message-more" type="button" data-action="delete-message" data-id="${esc(m.id)}">Delete</button>` : ""}</div></div>`).join("") : emptyState("Start the conversation","Send a message to begin.")}</div><form id="message-form" class="composer"><textarea name="text" rows="1" maxlength="4000" placeholder="Write a message…" required></textarea><button type="submit" aria-label="Send">${icon("send",20)}</button></form></section>`;
+    const visibleMessages = state.messages.filter((m) => {
+      const deletedFor = Array.isArray(m.deletedForUids) && m.deletedForUids.includes(state.user.uid);
+      const senderHidden = m.senderUid === state.user.uid && m.senderDeletedForMe === true;
+      return !deletedFor && !senderHidden;
+    });
+    return `<section class="screen conversation"><header class="conversation-head"><button class="icon-btn" type="button" data-action="close-thread" aria-label="Back">${icon("back")}</button>${avatar(p,"sm",true)}<div class="grow"><strong>${esc(p.displayName || p.username || "Conversation")}</strong><span>${esc(p.username ? `@${p.username}` : "Private conversation")}</span></div><button class="icon-btn" type="button" data-action="thread-menu" data-id="${esc(t.id || state.activeThreadId)}" aria-label="Conversation options">${icon("menuDots",18)}</button></header><div class="messages">${visibleMessages.length ? visibleMessages.map((m) => `<div class="message-row ${m.senderUid === state.user.uid ? "own" : ""}"><div class="bubble"><div>${esc(m.status === "deleted_for_everyone" ? "Message deleted" : (m.text || ""))}</div><small>${when(m.createdAt)}${m.editedAt ? " · edited" : ""}</small>${m.status !== "deleted_for_everyone" && m.type === "user" ? `<button class="message-more" type="button" data-action="message-menu" data-id="${esc(m.id)}">More</button>` : ""}</div></div>`).join("") : emptyState("Start the conversation","Send a message to begin.")}</div><form id="message-form" class="composer"><textarea name="text" rows="1" maxlength="4000" placeholder="Write a message…" required></textarea><button type="submit" aria-label="Send">${icon("send",20)}</button></form></section>`;
   }
-  const thread = (t) => { const p = peer(t); return `<button class="thread" type="button" data-action="open-thread" data-id="${esc(t.id)}">${avatar(p,"md",true)}<span class="thread-copy"><strong>${esc(p.displayName || p.username || "Conversation")}</strong><small>${esc(typeof t.lastMessage === "string" ? t.lastMessage : (t.lastMessage?.text || t.lastMessageText || "No messages yet"))}</small></span><span class="thread-meta">${when(t.lastMessageAt || t.updatedAt)}</span></button>`; };
-  return `<section class="screen chat-screen">${head("CONVERSATIONS","Chat","Private conversations with people you choose.","focus-chat-search","New chat")}${contextualSearch("chat-person-search-form","Search exact username…","users",state.chatSearchQuery)}${state.chatSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">PEOPLE</span><h2>Search results</h2></div><button class="text-button" type="button" data-action="clear-chat-search">Clear</button></div><div class="results">${state.chatSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}<div class="threads">${state.threads.length ? state.threads.map(thread).join("") : emptyState("No conversations yet","Search an exact username above to start a conversation.")}</div></section>`;
+  const visibleThreads = state.threads.filter((t) => {
+    const hidden = Array.isArray(t.hiddenForUids) && t.hiddenForUids.includes(state.user.uid);
+    if (hidden) return false;
+    const archived = Array.isArray(t.archivedUids) && t.archivedUids.includes(state.user.uid);
+    return state.chatFilter === "archived" ? archived : !archived;
+  });
+  const thread = (t) => {
+    const p = peer(t);
+    const pinned = Array.isArray(t.pinnedUids) && t.pinnedUids.includes(state.user.uid);
+    const archived = Array.isArray(t.archivedUids) && t.archivedUids.includes(state.user.uid);
+    const preview = typeof t.lastMessage === "string" ? t.lastMessage : (t.lastMessage?.text || t.lastMessageText || "No messages yet");
+    return `<article class="thread-entry"><button class="thread thread-main" type="button" data-action="open-thread" data-id="${esc(t.id)}">${avatar(p,"md",true)}<span class="thread-copy"><strong>${pinned ? `<span class="thread-pin-mark" aria-label="Pinned">◆ </span>` : ""}${esc(p.displayName || p.username || "Conversation")}</strong><small>${esc(preview)}</small></span><span class="thread-meta">${when(t.lastMessageAt || t.updatedAt)}</span></button><button class="thread-options-button" type="button" data-action="thread-menu" data-id="${esc(t.id)}" aria-label="Conversation options">${icon("menuDots",18)}</button>${state.chatMenuThreadId === t.id ? `<div class="thread-option-panel"><button type="button" data-action="toggle-pin-thread" data-id="${esc(t.id)}">${pinned ? "Unpin" : "Pin"}</button><button type="button" data-action="toggle-archive-thread" data-id="${esc(t.id)}">${archived ? "Unarchive" : "Archive"}</button><button type="button" data-action="hide-thread" data-id="${esc(t.id)}">Delete for me</button></div>` : ""}</article>`;
+  };
+  return `<section class="screen chat-screen">${head("CONVERSATIONS","Chat","Private conversations with people you choose.","focus-chat-search","New chat")}<div class="chat-list-filters" role="group" aria-label="Filter conversations"><button class="category-chip ${state.chatFilter === "all" ? "active" : ""}" type="button" data-action="chat-filter" data-filter="all">All chats</button><button class="category-chip ${state.chatFilter === "archived" ? "active" : ""}" type="button" data-action="chat-filter" data-filter="archived">Archived</button></div>${contextualSearch("chat-person-search-form","Search exact username…","users",state.chatSearchQuery)}${state.chatSearchResults.length ? `<section class="inline-results"><div class="section-head compact"><div><span class="eyebrow">PEOPLE</span><h2>Search results</h2></div><button class="text-button" type="button" data-action="clear-chat-search">Clear</button></div><div class="results">${state.chatSearchResults.slice(0,8).map(searchResultCard).join("")}</div></section>` : ""}<div class="threads">${visibleThreads.length ? visibleThreads.map(thread).join("") : emptyState(state.chatFilter === "archived" ? "No archived chats" : "No conversations yet",state.chatFilter === "archived" ? "Chats you archive will appear here." : "Search an exact username above to start a conversation.")}</div></section>`;
 }
 
 function renderSkills() {
@@ -904,9 +938,23 @@ function renderSkillProfile() {
 }
 
 function renderMarket() {
-  const filtered = state.products.filter((item) => categoryMatches(item.result || item, state.marketCategory || "all"));
-  const card = (item) => { const p = item.result || item; const image = p.mediaUrls?.[0]?.url; const productId = p.id || item.id || ""; const mediaPending = Array.isArray(p.mediaIds) && p.mediaIds.length && !Array.isArray(p.mediaUrls); return `<article class="product-card" ${mediaPending ? `data-media-kind="market" data-media-id="${esc(productId)}"` : ""} data-action="market-view" data-id="${esc(productId)}" tabindex="0"><div class="product-cover">${image ? `<img src="${esc(image)}" alt="${esc(p.title || "Product photo")}" loading="lazy" decoding="async">` : `<div class="product-cover-icon">${icon("market",24)}</div>`}</div><div class="product-info"><span class="eyebrow">PRODUCT</span><h3>${esc(p.title || item.title || "Product")}</h3><p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong></div></article>`; };
-  return `<section class="screen market-screen">${head("DISCOVERY","Marvel Market","Discover products from real storefronts.",state.myStore ? "route-business" : "",state.myStore ? "My Shop" : "")}${contextualSearch("market-form","Search products and shops…","market",state.searchQuery)}<div class="market-powered">Powered by Davonium Technologies</div><section class="section"><div class="section-head compact"><div><span class="eyebrow">CATEGORIES</span><h2>Browse categories</h2></div></div>${categoryChips("market",state.marketCategory || "all")}</section><section class="section"><div class="product-grid">${filtered.length ? filtered.map(card).join("") : emptyState("Nothing to show yet","Try another category or search phrase.")}</div></section></section>`;
+  const base = state.marketShowSaved ? state.savedMarketProducts : state.products;
+  const filtered = base.filter((item) => categoryMatches(item.result || item, state.marketCategory || "all"));
+  filtered.sort((a, b) => {
+    const ap = a.result || a; const bp = b.result || b;
+    if (state.marketSort === "price-low") return Number(ap.priceMinor || 0) - Number(bp.priceMinor || 0);
+    if (state.marketSort === "price-high") return Number(bp.priceMinor || 0) - Number(ap.priceMinor || 0);
+    return stamp(bp.createdAt || bp.updatedAt) - stamp(ap.createdAt || ap.updatedAt);
+  });
+  const card = (item) => {
+    const p = item.result || item;
+    const image = p.mediaUrls?.[0]?.url;
+    const productId = p.id || item.id || "";
+    const saved = state.savedMarketProductIds.includes(String(productId));
+    const mediaPending = Array.isArray(p.mediaIds) && p.mediaIds.length && !Array.isArray(p.mediaUrls);
+    return `<article class="product-card" ${mediaPending ? `data-media-kind="market" data-media-id="${esc(productId)}"` : ""}><button class="product-card-main" type="button" data-action="market-view" data-id="${esc(productId)}"><div class="product-cover">${image ? `<img src="${esc(image)}" alt="${esc(p.title || "Product photo")}" loading="lazy" decoding="async">` : `<div class="product-cover-icon">${icon("market",24)}</div>`}</div><div class="product-info"><span class="eyebrow">PRODUCT</span><h3>${esc(p.title || item.title || "Product")}</h3><p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong></div></button><button class="market-save-button ${saved ? "is-saved" : ""}" type="button" data-action="toggle-saved-market-product" data-id="${esc(productId)}" aria-pressed="${saved}">${icon("bookmark",16)}${saved ? "Saved" : "Save"}</button></article>`;
+  };
+  return `<section class="screen market-screen">${head("DISCOVERY","Marvel Market","Discover products from real storefronts.",state.myStore ? "route-business" : "",state.myStore ? "My Shop" : "")}${contextualSearch("market-form","Search products and shops…","market",state.searchQuery)}<div class="market-powered">Powered by Davonium Technologies</div><section class="section"><div class="section-head compact"><div><span class="eyebrow">CATEGORIES</span><h2>Browse categories</h2></div></div>${categoryChips("market",state.marketCategory || "all")}</section><section class="market-tool-row"><button class="category-chip ${state.marketShowSaved ? "active" : ""}" type="button" data-action="toggle-market-saved-view">${icon("bookmark",15)} Saved products</button><label class="market-sort-label">Sort <select data-action="market-sort" aria-label="Sort products"><option value="newest" ${state.marketSort === "newest" ? "selected" : ""}>Recommended / newest</option><option value="price-low" ${state.marketSort === "price-low" ? "selected" : ""}>Price: low to high</option><option value="price-high" ${state.marketSort === "price-high" ? "selected" : ""}>Price: high to low</option></select></label></section><section class="section"><div class="product-grid">${filtered.length ? filtered.map(card).join("") : emptyState(state.marketShowSaved ? "No saved products yet" : "Nothing to show yet",state.marketShowSaved ? "Save a product to keep it here for later." : "Try another category or search phrase.")}</div></section></section>`;
 }
 
 function renderBusiness() {
@@ -951,17 +999,16 @@ function renderProfile() {
   const posts = state.followStats.postCount ?? p.postsCount ?? p.postCount ?? 0;
   const followers = state.followStats.followersCount ?? p.followersCount ?? 0;
   const following = state.followStats.followingCount ?? p.followingCount ?? state.followingIds.length ?? 0;
-  return `<section class="screen">${head("YOUR SPACE","Profile","Your identity, provider account, seller account, and settings.","edit-profile","Edit profile")}<div class="profile-hero">${avatar(p,"xl",true)}<div class="profile-main"><h1>${esc(p.displayName || state.user?.displayName || "Your profile")}</h1><p class="handle">${esc(p.username ? `@${p.username}` : p.email || state.user?.email || "")}</p><p class="bio">${esc(p.bio || "")}</p></div></div><div class="profile-stats"><div><strong>${esc(posts)}</strong><span>Posts</span></div><div><strong>${esc(followers)}</strong><span>Followers</span></div><div><strong>${esc(following)}</strong><span>Following</span></div></div><div class="profile-grid"><button class="profile-tile" type="button" data-action="route-skill-profile"><span class="tile-icon">${icon("skills",20)}</span><strong>${state.skillProfile ? "My Skills" : "Create skill account"}</strong><small>${state.skillProfile ? "Manage your provider profile and services." : "Become a provider from your Profile."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-business"><span class="tile-icon">${icon("shop",20)}</span><strong>${state.myStore ? "My Shop" : "Create seller account"}</strong><small>${state.myStore ? "Manage your storefront, products, stock, and orders." : "Create a seller account before opening your shop."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-settings"><span class="tile-icon">${icon("settings",20)}</span><strong>Settings</strong><small>Appearance and notification preferences.</small>${icon("arrow",17)}</button></div><div class="profile-footer-actions"><button class="btn btn-secondary" type="button" data-action="sign-out">${icon("logout",17)}Sign out</button></div></section>`;
+  return `<section class="screen">${head("YOUR SPACE","Profile","Your identity, provider account, seller account, and settings.","edit-profile","Edit profile")}<div class="profile-hero">${avatar(p,"xl",true)}<div class="profile-main"><h1>${esc(p.displayName || state.user?.displayName || "Your profile")}</h1><p class="handle">${esc(p.username ? `@${p.username}` : p.email || state.user?.email || "")}</p><p class="bio">${esc(p.bio || "")}</p></div></div><div class="profile-stats"><div class="profile-stat" aria-label="Your post count"><strong>${esc(posts)}</strong><span>Posts</span></div><button class="profile-stat" type="button" data-action="profile-follow-list" data-direction="followers"><strong>${esc(followers)}</strong><span>Followers</span></button><button class="profile-stat" type="button" data-action="profile-follow-list" data-direction="following"><strong>${esc(following)}</strong><span>Following</span></button></div><div class="profile-grid"><button class="profile-tile" type="button" data-action="route-skill-profile"><span class="tile-icon">${icon("skills",20)}</span><strong>${state.skillProfile ? "My Skills" : "Create skill account"}</strong><small>${state.skillProfile ? "Manage your provider profile and services." : "Become a provider from your Profile."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-business"><span class="tile-icon">${icon("shop",20)}</span><strong>${state.myStore ? "My Shop" : "Create seller account"}</strong><small>${state.myStore ? "Manage your storefront, products, stock, and orders." : "Create a seller account before opening your shop."}</small>${icon("arrow",17)}</button><button class="profile-tile" type="button" data-action="route-settings"><span class="tile-icon">${icon("settings",20)}</span><strong>Settings</strong><small>Appearance and notification preferences.</small>${icon("arrow",17)}</button></div><div class="profile-footer-actions"><button class="btn btn-secondary" type="button" data-action="sign-out">${icon("logout",17)}Sign out</button></div></section>`;
 }
 
 function renderSearch() {
-  const results = state.searchResults.slice(0, 24);
-  const scope = ["people_posts", "users"].includes(state.searchScope) ? state.searchScope : "people_posts";
-  return `<section class="screen">${head("DISCOVERY", "Search", "Find people and public posts.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search people and posts…" autocomplete="off"></label><select name="scope"><option value="people_posts" ${scope === "people_posts" ? "selected" : ""}>People and posts</option><option value="users" ${scope === "users" ? "selected" : ""}>People only</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching", "Search by name, username, or words from a public post.")}</div></section>`;
+  const results = state.searchResults.slice(0,24);
+  return `<section class="screen">${head("DISCOVERY","Search","Find people, skills, products, and shops.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search everything…" autocomplete="off"></label><select name="scope"><option value="all" ${state.searchScope === "all" ? "selected" : ""}>Everything</option><option value="users" ${state.searchScope === "users" ? "selected" : ""}>People</option><option value="skills" ${state.searchScope === "skills" ? "selected" : ""}>Skills</option><option value="market" ${state.searchScope === "market" ? "selected" : ""}>Market</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching","Search by name, username, skill, product, or shop.")}</div></section>`;
 }
 function renderNotifications() { return `<section class="screen">${head("UPDATES","Notifications",state.unreadNotifications ? `${state.unreadNotifications} unread` : "You are all caught up.", "", "", "home")}<div>${state.notifications.length ? state.notifications.map((n) => `<article class="notification ${n.read || n.isRead || n.readAt ? "" : "unread"}"><div class="notification-icon">${icon("bell",18)}</div><div class="grow"><strong>${esc(n.title || "Marvel Chat")}</strong><p>${esc(n.body || "")}</p><small>${when(n.createdAt)}</small></div>${!(n.read || n.isRead || n.readAt) ? `<button class="text-button" type="button" data-action="read-notification" data-id="${esc(n.id)}">Mark read</button>` : ""}</article>`).join("") : emptyState("No new notifications","Activity updates will appear here.")}</div></section>`; }
 function renderSettings() {
-  return `<section class="screen">${head("PREFERENCES", "Settings", "Choose how Marvel Chat looks and behaves.", "", "", "profile")}<div class="settings-list"><article class="setting-card"><div class="setting-copy"><strong>Appearance</strong><small>Choose the theme used across the application.</small></div><div class="theme-pills">${["light", "dark", "system"].map((x) => `<button class="${state.theme === x ? "active" : ""}" type="button" data-action="theme-${x}">${icon(x === "light" ? "sun" : x === "dark" ? "moon" : "system", 16)}${x[0].toUpperCase() + x.slice(1)}</button>`).join("")}</div></article><article class="setting-card"><div class="setting-copy"><strong>Notifications</strong><small>Receive Marvel Chat updates on this browser when permission is enabled.</small></div>${state.pushEnabled ? `<button class="btn btn-secondary" type="button" data-action="disable-notifications">Disable</button>` : `<button class="btn btn-primary" type="button" data-action="enable-notifications">Enable</button>`}</article><article class="setting-card"><div class="setting-copy"><strong>Install Marvel Chat</strong><small>Add Marvel Chat to your home screen for an app-like experience. Installation depends on your browser and device.</small></div><button class="btn btn-secondary" type="button" data-action="install-app">Install</button></article><article class="setting-card"><div class="setting-copy"><strong>App updates</strong><small>Check for the latest app shell while online.</small></div><button class="btn btn-secondary" type="button" data-action="check-app-update">Check</button></article><button class="setting-card setting-link" type="button" data-action="legal-terms"><div class="setting-copy"><strong>Terms</strong><small>Review our service terms.</small></div>${icon("arrow", 18)}</button><button class="setting-card setting-link" type="button" data-action="legal-privacy"><div class="setting-copy"><strong>Privacy</strong><small>Learn how account and activity data are handled.</small></div>${icon("arrow", 18)}</button><button class="setting-card setting-link" type="button" data-action="legal-community"><div class="setting-copy"><strong>Community Guidelines</strong><small>Our standards for a useful and trustworthy community.</small></div>${icon("arrow", 18)}</button><div class="company-links"><a href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">Davonium Technologies ↗</a><a href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">Contact support ↗</a></div></div></section>`;
+  return `<section class="screen">${head("PREFERENCES","Settings","Choose how Marvel Chat looks and behaves.", "", "", "profile")}<div class="settings-list"><article class="setting-card"><div class="setting-copy"><strong>Appearance</strong><small>Choose the theme used across the application.</small></div><div class="theme-pills">${["light","dark","system"].map((x) => `<button class="${state.theme === x ? "active" : ""}" type="button" data-action="theme-${x}">${icon(x === "light" ? "sun" : x === "dark" ? "moon" : "system",16)}${x[0].toUpperCase()+x.slice(1)}</button>`).join("")}</div></article><article class="setting-card"><div class="setting-copy"><strong>Notifications</strong><small>Receive Marvel Chat updates on this browser when permission is enabled.</small></div>${state.pushEnabled ? `<button class="btn btn-secondary" type="button" data-action="disable-notifications">Disable</button>` : `<button class="btn btn-primary" type="button" data-action="enable-notifications">Enable</button>`}</article><button class="setting-card setting-link" type="button" data-action="legal-terms"><div class="setting-copy"><strong>Terms</strong><small>Review our service terms.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-privacy"><div class="setting-copy"><strong>Privacy</strong><small>Learn how account and activity data are handled.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-community"><div class="setting-copy"><strong>Community Guidelines</strong><small>Our standards for a useful and trustworthy community.</small></div>${icon("arrow",18)}</button></div></section>`;
 }
 
 function getBrowserDeviceIds() {
@@ -1066,7 +1113,8 @@ async function legalBody(type) {
   }[type];
   const legalLinks = [["terms","Terms of Use"],["privacy","Privacy Policy"],["community","Community Guidelines"]];
   const switcher = `<nav class="legal-modal-switcher" aria-label="Switch legal page">${legalLinks.map(([key,label]) => `<button type="button" class="${key === type ? "active" : ""}" data-action="legal-${key}" ${key === type ? 'aria-current="page"' : ""}>${label}</button>`).join("")}</nav>`;
-  const hero = `<section class="legal-modal-hero"><div class="legal-modal-mark"><img src="./assets/brand/icon-192.png" width="56" height="56" alt="Marvel Chat"></div><div class="legal-modal-hero-copy"><span class="eyebrow">OFFICIAL POLICY · DAVONIUM TECHNOLOGIES</span><h3>${esc({terms:"Terms of Use",privacy:"Privacy Policy",community:"Community Guidelines"}[type])}</h3><p>${esc(summary)}</p></div>${switcher}</section>`;
+  const corporateNav = `<nav class="legal-corporate-nav" aria-label="Davonium Technologies policies"><a href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">Company</a><a href="https://www.davoniumtech.com/legal/terms" target="_blank" rel="noopener noreferrer">Company Terms</a><a href="https://www.davoniumtech.com/legal/privacy" target="_blank" rel="noopener noreferrer">Company Privacy</a><a href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">Contact</a></nav>`;
+  const hero = `<section class="legal-modal-hero"><div class="legal-modal-mark"><img src="./assets/brand/icon-192.png" width="56" height="56" alt="Marvel Chat"></div><div class="legal-modal-hero-copy"><span class="eyebrow">OFFICIAL POLICY · DAVONIUM TECHNOLOGIES</span><h3>${esc({terms:"Terms of Use",privacy:"Privacy Policy",community:"Community Guidelines"}[type])}</h3><p>${esc(summary)}</p></div>${switcher}${corporateNav}</section>`;
   return `${hero}<div class="legal-modal-document">${main.innerHTML}</div>`;
 }
 
@@ -1130,7 +1178,7 @@ function bindCatalogueMedia() {
       const kind = entry.target.dataset.mediaKind;
       const id = entry.target.dataset.mediaId;
       let item = null;
-      if (kind === "market") item = state.products.find((candidate) => candidate.id === id || candidate.result?.id === id);
+      if (kind === "market") item = [...state.products, ...state.savedMarketProducts].find((candidate) => candidate.id === id || candidate.result?.id === id);
       if (kind === "skill") item = state.skills.find((candidate) => candidate.id === id);
       if (!item) continue;
       const routeAtStart = state.route;
@@ -1439,10 +1487,31 @@ document.addEventListener("click", async (e) => {
     }
     if (a.startsWith("legal-")) { document.getElementById("menu-root")?.remove(); openLegal(a.slice(6)); return; }
     if (a === "feedback") { document.getElementById("menu-root")?.remove(); openFeedback(); return; }
+    if (a === "install-app") {
+      document.getElementById("menu-root")?.remove();
+      if (deferredInstallPrompt) {
+        const promptEvent = deferredInstallPrompt;
+        deferredInstallPrompt = null;
+        promptEvent.prompt();
+        const choice = await promptEvent.userChoice.catch(() => ({outcome: "dismissed"}));
+        state.installAvailable = false;
+        toast(choice.outcome === "accepted" ? "Starting installation…" : "Installation was not started. You can try again from your browser menu.", choice.outcome === "accepted" ? "success" : "info");
+      } else {
+        toast("To install Marvel Chat, open your browser menu and choose Install app or Add to Home screen when available.", "info");
+      }
+      return;
+    }
+    if (a === "check-app-update") {
+      document.getElementById("menu-root")?.remove();
+      if (!("serviceWorker" in navigator)) { toast("App updates are managed by this browser.", "info"); return; }
+      try {
+        const registration = await navigator.serviceWorker.getRegistration("./sw.js");
+        if (registration) { await registration.update(); toast("Update check complete. If a new version is published, refresh after it becomes ready.", "success"); }
+        else toast("No app worker is registered for this page yet.", "info");
+      } catch (error) { toast("Could not check for an update right now. Please try again when online.", "error"); }
+      return;
+    }
     if (a === "sign-out") { document.getElementById("menu-root")?.remove(); await signOut(auth); return; }
-    if (a === "install-app") { await promptAppInstall(); return; }
-    if (a === "check-app-update") { await checkForAppUpdate(); return; }
-    if (a === "refresh-app") { window.location.reload(); return; }
     if (a === "create-menu") { openCreateMenu(); return; }
     if (a === "pick-post-media") { document.getElementById("post-media")?.click(); return; }
     if (a === "pick-moment-media") { document.getElementById("moment-photo")?.click(); return; }
@@ -1590,8 +1659,71 @@ document.addEventListener("click", async (e) => {
     if (a === "clear-home-search") { state.searchQuery="";state.homeSearchResults=[];paint();return; }
     if (a === "clear-chat-search") { state.chatSearchQuery="";state.chatSearchResults=[];paint();return; }
     if (a === "focus-chat-search") { state.route="chat"; paint(); setTimeout(()=>document.querySelector('#chat-person-search-form input[name="query"]')?.focus(),0); return; }
-    if (a === "open-thread") { state.activeThreadId=actionEl.dataset.id;state.messages=[];const thread=state.threads.find((x)=>x.id===state.activeThreadId);if(thread) await hydrateThreadPeer(thread);paint();await loadMessages(state.activeThreadId);return; }
+    if (a === "open-thread") { state.activeThreadId=actionEl.dataset.id;state.chatMenuThreadId="";state.messages=[];const thread=state.threads.find((x)=>x.id===state.activeThreadId);if(thread) await hydrateThreadPeer(thread);paint();await loadMessages(state.activeThreadId);return; }
     if (a === "close-thread") { clearSubscriptions();state.activeThreadId=null;state.messages=[];go("chat");return; }
+    if (a === "chat-filter") { state.chatFilter = actionEl.dataset.filter === "archived" ? "archived" : "all"; state.chatMenuThreadId=""; paint(); return; }
+    if (a === "thread-menu") {
+      const threadId = actionEl.dataset.id || state.activeThreadId;
+      const thread = state.threads.find((item) => item.id === threadId);
+      if (!thread) return;
+      if (!state.activeThreadId) { state.chatMenuThreadId = state.chatMenuThreadId === threadId ? "" : threadId; paint(); return; }
+      const isPinned = Array.isArray(thread.pinnedUids) && thread.pinnedUids.includes(state.user.uid);
+      const isArchived = Array.isArray(thread.archivedUids) && thread.archivedUids.includes(state.user.uid);
+      modal("Conversation options", `<div class="form-stack"><button class="btn btn-secondary btn-block" type="button" data-action="toggle-pin-thread" data-id="${esc(threadId)}">${isPinned ? "Unpin conversation" : "Pin conversation"}</button><button class="btn btn-secondary btn-block" type="button" data-action="toggle-archive-thread" data-id="${esc(threadId)}">${isArchived ? "Unarchive conversation" : "Archive conversation"}</button><button class="btn btn-secondary btn-block" type="button" data-action="hide-thread" data-id="${esc(threadId)}">Delete conversation for me</button></div>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`);
+      return;
+    }
+    if (a === "toggle-pin-thread" || a === "toggle-archive-thread" || a === "hide-thread") {
+      const threadId = actionEl.dataset.id || state.activeThreadId;
+      const thread = state.threads.find((item) => item.id === threadId);
+      if (!threadId || !thread) return;
+      const preference = a === "toggle-pin-thread" ? "pin" : a === "toggle-archive-thread" ? "archive" : "delete_for_me";
+      const field = preference === "pin" ? "pinnedUids" : preference === "archive" ? "archivedUids" : "hiddenForUids";
+      const currentlyEnabled = Array.isArray(thread[field]) && thread[field].includes(state.user.uid);
+      const enabled = preference === "delete_for_me" ? true : !currentlyEnabled;
+      await api.updateChatThreadPreference({threadId, preference, enabled});
+      closeModal();
+      if (a === "hide-thread" && state.activeThreadId === threadId) { clearSubscriptions(); state.activeThreadId = null; state.messages = []; }
+      state.chatMenuThreadId = "";
+      await loadThreads();
+      toast(a === "hide-thread" ? "Conversation removed from your chat list." : a === "toggle-pin-thread" ? (enabled ? "Conversation pinned." : "Conversation unpinned.") : (enabled ? "Conversation archived." : "Conversation restored."), "success");
+      paint();
+      return;
+    }
+    if (a === "message-menu") {
+      const m = state.messages.find((item) => item.id === actionEl.dataset.id);
+      if (!m) return;
+      const own = m.senderUid === state.user.uid;
+      modal("Message options", `<div class="form-stack">${own && m.status !== "deleted_for_everyone" && typeof m.text === "string" && m.text ? `<button class="btn btn-secondary btn-block" type="button" data-action="edit-message" data-id="${esc(m.id)}">Edit message</button>` : ""}<button class="btn btn-secondary btn-block" type="button" data-action="delete-message-for-me" data-id="${esc(m.id)}">Delete for me</button>${own && m.status !== "deleted_for_everyone" ? `<button class="btn btn-secondary btn-block" type="button" data-action="delete-message-for-everyone" data-id="${esc(m.id)}">Delete for everyone</button>` : ""}</div>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button>`);
+      return;
+    }
+    if (a === "edit-message") {
+      const m = state.messages.find((item) => item.id === actionEl.dataset.id);
+      if (!m || m.senderUid !== state.user.uid || m.status === "deleted_for_everyone") return;
+      modal("Edit message", `<form id="edit-message-form" class="form-stack"><input type="hidden" name="messageId" value="${esc(m.id)}"><label class="floating-field"><textarea name="text" maxlength="4000" required placeholder=" ">${esc(m.text || "")}</textarea><span>Message text</span></label><small class="muted">Editing updates this message for the conversation.</small></form>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="submit-edit-message">Save edit</button>`, {wide:true});
+      return;
+    }
+    if (a === "submit-edit-message") {
+      const form = document.getElementById("edit-message-form");
+      if (!form) return;
+      const data = Object.fromEntries(new FormData(form));
+      const text = String(data.text || "").trim();
+      if (!text) { toast("Message cannot be empty.", "error"); return; }
+      await api.editMessage({threadId: state.activeThreadId, messageId: String(data.messageId || ""), text});
+      closeModal(); toast("Message updated.", "success"); return;
+    }
+    if (a === "delete-message-for-me") {
+      await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode:"for_me"});
+      state.messages = state.messages.filter((item) => item.id !== actionEl.dataset.id);
+      closeModal(); paint(); toast("Message removed from your view.", "success"); return;
+    }
+    if (a === "delete-message-for-everyone") {
+      modal("Delete for everyone?", "This removes your message from the conversation for all participants.", `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-primary" type="button" data-action="confirm-delete-message" data-id="${esc(actionEl.dataset.id)}">Delete for everyone</button>`);
+      return;
+    }
+    if (a === "confirm-delete-message") {
+      await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode:"for_everyone"});
+      closeModal(); toast("Message deleted for everyone.", "success"); return;
+    }
     if (a === "delete-message") { await api.deleteMessage({threadId:state.activeThreadId,messageId:actionEl.dataset.id,mode:"for_everyone"});toast("Message deleted.","success");return; }
     if (a === "message-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); const profile=item?.result || item || {}; const derivedUsername = profile.username || String(item?.subtitle || "").replace(/^@/, ""); state.threadPeers[target]={uid:target,displayName:item?.title || profile.displayName || derivedUsername || "Conversation",username:derivedUsername,photoURL:profile.photoURL || null};saveThreadPeers(); const id=await findOrCreateDirectThread(target,state.threadPeers[target]); state.route="chat";state.activeThreadId=id;await loadThreads();paint();await loadMessages(id);return; }
     if (a === "view-user") { const target=actionEl.dataset.id; if(!target || target===state.user.uid)return; const item=[...state.chatSearchResults,...state.homeSearchResults,...state.searchResults].find((x)=>String(x.id)===String(target)); await openPublicUserProfile(target,item || {}); return; }
@@ -1603,7 +1735,7 @@ document.addEventListener("click", async (e) => {
     if (a === "edit-skill-listing") { const s=state.skillListingsMine.find((x)=>x.id===actionEl.dataset.id); if(s)openSkillListingEditor(s);return; }
     if (a === "pause-skill-listing" || a === "activate-skill-listing") { await api.updateSkillListing({listingId:actionEl.dataset.id,status:a === "activate-skill-listing" ? "active" : "paused"});toast(a === "activate-skill-listing" ? "Service offered again." : "Service paused.","success");await loadSkillWorkspace();paint();return; }
     if (a === "delete-skill-listing") { await api.deleteSkillListing({listingId:actionEl.dataset.id});toast("Service archived.","success");await loadSkillWorkspace();paint();return; }
-    if (a === "market-view") { const m=state.products.find((x)=>x.id===actionEl.dataset.id || x.result?.id===actionEl.dataset.id); if(m){await hydrateMarketProductMedia(m);openMarketProduct(m);}return; }
+    if (a === "market-view") { const m=[...state.products,...state.savedMarketProducts].find((x)=>String(x.id || x.result?.id)===String(actionEl.dataset.id)); if(m){await hydrateMarketProductMedia(m);openMarketProduct(m);}return; }
     if (a === "submit-purchase") { const d=Object.fromEntries(new FormData(document.getElementById("purchase-form"))); const quantity=Math.max(1,Math.min(1000,Number(d.quantity||1))); await api.createMarketCommerceRequest({items:[{productId:d.productId,quantity}],customerNote:String(d.customerNote || "").trim()});closeModal();toast("Commerce request sent.","success");return; }
     if (a === "route-seller-onboarding") { state.sellerOnboardingStep=0;go("seller-onboarding");return; }
     if (a === "submit-store") { const d=Object.fromEntries(new FormData(document.getElementById("seller-details-form"))); if(state.myStore){await api.updateStoreProfile({storeId:state.myStore.id,name:String(d.name).trim(),description:String(d.description || "").trim(),locationText:String(d.location || "").trim()});toast("Store updated.","success");}else{const r=await api.createStore({name:String(d.name).trim(),description:String(d.description || "").trim(),category:String(d.category || "").trim(),location:String(d.location || "").trim()});state.sellerDraft={...state.sellerDraft,...d,storeId:r?.storeId || "",agreed:true};saveSellerDraft();toast("Store created.","success");}closeModal();await loadBusinessWorkspace();go("business");return; }
@@ -1656,6 +1788,23 @@ document.addEventListener("click", async (e) => {
     if (a === "activate-product" || a === "pause-product") { await api.setProductAvailability({productId:actionEl.dataset.id,status:a === "activate-product" ? "active" : "paused"});toast(a === "activate-product" ? "Product activated." : "Product paused.","success");await loadBusinessWorkspace();paint();return; }
     if (a === "archive-product") { await api.archiveProduct({productId:actionEl.dataset.id});toast("Product archived.","success");await loadBusinessWorkspace();paint();return; }
     if (a === "commerce-status") { await api.updateMarketCommerceRequestStatus({requestId:actionEl.dataset.id,status:actionEl.dataset.status});toast("Commerce request updated.","success");await loadBusinessWorkspace();paint();return; }
+    if (a === "profile-follow-list") {
+      const direction = actionEl.dataset.direction === "following" ? "following" : "followers";
+      const title = direction === "following" ? "Following" : "Followers";
+      modal(title, `<div class="profile-follow-list" id="profile-follow-list-content"><div class="feed-loader" role="status">Loading ${title.toLowerCase()}…</div></div>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Done</button>`, {wide:true});
+      try {
+        const result = await api.getFollowList({targetUid:state.user.uid,direction,limit:50});
+        const box = document.getElementById("profile-follow-list-content");
+        if (!box) return;
+        const users = Array.isArray(result?.users) ? result.users : [];
+        box.innerHTML = users.length ? users.map((person) => `<button class="profile-follow-row" type="button" data-action="open-user-profile" data-id="${esc(person.uid)}">${avatar(person,"sm",true)}<span><strong>${esc(person.displayName || person.username || "Marvel Chat member")}</strong><small>${esc(person.username ? `@${person.username}` : "Member")}</small></span>${icon("arrow",16)}</button>`).join("") : `<p class="muted">${direction === "following" ? "You are not following anyone yet." : "You do not have any followers yet."}</p>`;
+      } catch (error) {
+        const box = document.getElementById("profile-follow-list-content");
+        if (box) box.innerHTML = `<p class="muted">The list could not be loaded. Please try again.</p>`;
+        throw error;
+      }
+      return;
+    }
     if (a === "edit-profile") { openProfileEdit();return; }
     if (a === "submit-profile") {
       const d = Object.fromEntries(new FormData(document.getElementById("profile-form")));
@@ -1685,6 +1834,51 @@ document.addEventListener("click", async (e) => {
     if (a === "disable-notifications") { await disableBrowserNotifications(); return; }
     if (a.startsWith("theme-")) { const t=a.slice(6);setTheme(t);paint();try{await api.updateUserSettings({themeId:t});}catch{}return; }
     if (a === "market-category") { state.marketCategory=actionEl.dataset.category || "all";paint();return; }
+    if (a === "toggle-market-saved-view") {
+      state.marketShowSaved = !state.marketShowSaved;
+      paint();
+      const items = state.marketShowSaved ? state.savedMarketProducts : state.products;
+      void Promise.all(items.slice(0, 8).map((item) => hydrateMarketProductMedia(item))).then(() => { if (state.route === "market") paint(); });
+      return;
+    }
+    if (a === "toggle-saved-market-product") {
+      const productId = String(actionEl.dataset.id || "");
+      if (!productId) return;
+      const all = [...state.products, ...state.savedMarketProducts];
+      const item = all.find((candidate) => String(candidate.id || candidate.result?.id) === productId);
+      const product = item?.result || item;
+      if (!product) return;
+      const wasSaved = state.savedMarketProductIds.includes(productId);
+      const desired = !wasSaved;
+      if (desired) {
+        state.savedMarketProductIds = [...new Set([...state.savedMarketProductIds, productId])];
+        if (!state.savedMarketProducts.some((candidate) => String(candidate.id) === productId)) state.savedMarketProducts = [{...product}, ...state.savedMarketProducts].slice(0, 40);
+      } else {
+        state.savedMarketProductIds = state.savedMarketProductIds.filter((id) => String(id) !== productId);
+        state.savedMarketProducts = state.savedMarketProducts.filter((candidate) => String(candidate.id) !== productId);
+      }
+      paint();
+      try {
+        const result = await api.saveMarketProduct({productId, saved: desired});
+        const actual = Boolean(result?.saved);
+        if (actual !== desired) {
+          if (actual) state.savedMarketProductIds = [...new Set([...state.savedMarketProductIds, productId])];
+          else state.savedMarketProductIds = state.savedMarketProductIds.filter((id) => String(id) !== productId);
+        }
+        if (!actual) state.savedMarketProducts = state.savedMarketProducts.filter((candidate) => String(candidate.id) !== productId);
+        toast(actual ? "Product saved for later." : "Product removed from saved items.", "success");
+      } catch (error) {
+        if (wasSaved) {
+          state.savedMarketProductIds = [...new Set([...state.savedMarketProductIds, productId])];
+          if (!state.savedMarketProducts.some((candidate) => String(candidate.id) === productId)) state.savedMarketProducts.unshift({...product});
+        } else {
+          state.savedMarketProductIds = state.savedMarketProductIds.filter((id) => String(id) !== productId);
+          state.savedMarketProducts = state.savedMarketProducts.filter((candidate) => String(candidate.id) !== productId);
+        }
+        throw error;
+      } finally { paint(); }
+      return;
+    }
     if (a === "skills-category") { state.skillCategory=actionEl.dataset.category || "all";paint();return; }
     if (a === "onboarding-next") { const step=state.sellerOnboardingStep; if(step===2 && !document.getElementById("seller-agreement")?.checked){toast("Please accept the seller standards.","error");return;} if(step===3){const f=document.getElementById("seller-details-form");const d=f ? Object.fromEntries(new FormData(f)) : {};state.sellerDraft={...state.sellerDraft,...d,agreed:true};saveSellerDraft(); if(state.myStore) await api.updateStoreProfile({storeId:state.myStore.id,name:String(d.name).trim(),description:String(d.description || "").trim(),locationText:String(d.location || "").trim()}); else {const r=await api.createStore({name:String(d.name).trim(),description:String(d.description || "").trim(),category:String(d.category || "").trim(),location:String(d.location || "").trim()});state.sellerDraft.storeId=r?.storeId || "";} await loadBusinessWorkspace();go("business");return;} state.sellerOnboardingStep++;paint();return; }
     if (a === "onboarding-back") { if(state.sellerOnboardingStep>0){state.sellerOnboardingStep--;paint();}return; }
@@ -1732,6 +1926,11 @@ document.addEventListener("click", async (e) => {
 
 document.addEventListener("change", async (e) => {
   const input = e.target;
+  if (input?.dataset?.action === "market-sort") {
+    state.marketSort = ["newest", "price-low", "price-high"].includes(input.value) ? input.value : "newest";
+    paint();
+    return;
+  }
   if (input?.id === "profile-photo-input" && input.files?.[0]) {
     state.pendingProfilePhotoFile = input.files[0];
     const box = document.getElementById("profile-photo-preview");
@@ -1864,10 +2063,11 @@ document.addEventListener("submit", async (e) => {
     if(f.id === "signin-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));await persistenceReady;try{await signInWithEmailAndPassword(auth,String(d.email).trim(),String(d.password));}catch(err){console.error("[Marvel Chat] email sign-in",err?.code,err?.message);throw err;}return;}
     if(f.id === "forgot-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));await sendPasswordResetEmail(auth,String(d.email).trim());toast("If an account matches that email, a reset link is on its way.","success");return;}
     if(f.id === "message-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));const text=String(d.text || "").trim();if(!text)return;await api.sendMessage({threadId:state.activeThreadId,text});f.reset();return;}
+    if(f.id === "edit-message-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));const text=String(d.text || "").trim();if(!text){toast("Message cannot be empty.","error");return;}await api.editMessage({threadId:state.activeThreadId,messageId:String(d.messageId || ""),text});closeModal();toast("Message updated.","success");return;}
     if(f.id === "home-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();if(state.searchQuery.length<2){state.homeSearchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:"people_posts"});state.homeSearchResults=Array.isArray(r?.results)?r.results.filter((item)=>["user","person","post"].includes(String(item?.type||"").toLowerCase())):[];paint();return;}
     if(f.id === "chat-person-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.chatSearchQuery=String(d.query || "").trim();if(state.chatSearchQuery.length<2){state.chatSearchResults=[];paint();return;}const r=await api.search({query:state.chatSearchQuery,scope:"users"});state.chatSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "skills-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.skillsSearchQuery=String(d.query || "").trim();paint();return;}
-    if(f.id === "search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.searchScope=String(d.scope || "people_posts");if(state.searchQuery.length<2){state.searchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:state.searchScope});state.searchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
+    if(f.id === "search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.searchScope=String(d.scope || "all");if(state.searchQuery.length<2){state.searchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:state.searchScope});state.searchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "market-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();await loadMarket();paint();return;}
   } catch(err) { e.preventDefault(); console.error(err?.code,err?.message); toast(friendlyError(err),"error"); }
 });
@@ -1879,85 +2079,20 @@ document.addEventListener("keydown", (e) => {
   if(e.target.matches(".composer textarea") && e.key === "Enter" && !e.shiftKey){e.preventDefault();e.target.form?.requestSubmit();}
 });
 
-let deferredInstallPrompt = null;
-
-function syncConnectionStatus() {
-  const status = document.getElementById("connection-status");
-  if (status) status.hidden = Boolean(navigator.onLine);
-}
-
-function showPwaUpdateStatus() {
-  const status = document.getElementById("pwa-update-status");
-  if (status) status.hidden = false;
-}
-
-async function promptAppInstall() {
-  if (deferredInstallPrompt) {
-    const promptEvent = deferredInstallPrompt;
-    deferredInstallPrompt = null;
-    try {
-      await promptEvent.prompt();
-      const choice = await promptEvent.userChoice;
-      toast(choice?.outcome === "accepted" ? "Marvel Chat installation started." : "Installation was not selected.", "info");
-    } catch (error) {
-      console.debug("[Marvel Chat] install prompt unavailable", error?.name || error?.message);
-      toast("Use your browser menu and choose Install app or Add to Home screen when available.", "info");
-    }
-    return;
-  }
-  toast("Use your browser menu and choose Install app or Add to Home screen when available.", "info");
-}
-
-async function checkForAppUpdate() {
-  if (!navigator.onLine) {
-    toast("Connect to the internet to check for updates.", "info");
-    return;
-  }
-  if (!("serviceWorker" in navigator)) {
-    toast("App updates are managed by your browser on this device.", "info");
-    return;
-  }
-  try {
-    const registration = await navigator.serviceWorker.getRegistration();
-    if (!registration) {
-      await navigator.serviceWorker.register("./sw.js");
-    } else {
-      await registration.update();
-      if (registration.waiting) registration.waiting.postMessage({type: "SKIP_WAITING"});
-    }
-    toast("Marvel Chat checked for updates.", "success");
-  } catch (error) {
-    console.debug("[Marvel Chat] update check failed", error?.message);
-    toast("The app update check failed. Please try again when online.", "error");
-  }
-}
-
 window.addEventListener("beforeinstallprompt", (event) => {
+  // Installation is user-initiated from the menu; never interrupt first visit.
   event.preventDefault();
   deferredInstallPrompt = event;
+  state.installAvailable = true;
 });
 window.addEventListener("appinstalled", () => {
   deferredInstallPrompt = null;
-  toast("Marvel Chat has been installed.", "success");
+  state.installAvailable = false;
+  toast("Marvel Chat is installed on this device.", "success");
 });
-window.addEventListener("online", syncConnectionStatus);
-window.addEventListener("offline", syncConnectionStatus);
-syncConnectionStatus();
-
-if ("serviceWorker" in navigator) {
-  let hadController = Boolean(navigator.serviceWorker.controller);
-  navigator.serviceWorker.addEventListener("controllerchange", () => {
-    if (hadController) showPwaUpdateStatus();
-    hadController = true;
-  });
-  navigator.serviceWorker.register("./sw.js")
-    .then((registration) => {
-      if (registration.waiting && navigator.serviceWorker.controller) showPwaUpdateStatus();
-      return registration.update().catch(() => {});
-    })
-    .catch((error) => console.debug("[Marvel Chat] offline shell registration unavailable", error?.message));
-}
-
+window.addEventListener("offline", () => { state.isOffline = true; if (state.user) paint(); });
+window.addEventListener("online", () => { state.isOffline = false; if (state.user) paint(); });
+if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
 app.innerHTML=`<main class="splash"><section class="splash-card"><div class="brand-mark brand-mark-xl"><img src="./assets/brand/icon-512.png" alt="Marvel Chat"></div><h1>Marvel Chat</h1><p>by Davonium Technologies</p><div class="loader"><span></span></div></section></main>`;
 
 onAuthStateChanged(auth, async (user) => {
