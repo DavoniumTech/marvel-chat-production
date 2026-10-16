@@ -23,7 +23,7 @@ import {
 const app = document.getElementById("app");
 const routes = [
   "home", "chat", "skills", "market", "profile", "search", "saved-posts",
-  "notifications", "settings", "skill-profile", "business",
+  "notifications", "settings", "help", "skill-profile", "business",
   "seller-onboarding", "skill-onboarding"
 ];
 const MARKET_CATEGORIES = [
@@ -222,6 +222,7 @@ function sideMenu() {
       <button class="menu-item" type="button" data-action="route-notifications">${icon("bell")}Notifications</button>
       <button class="menu-item" type="button" data-action="route-saved-posts">${icon("bookmark")}Saved posts</button>
       <button class="menu-item" type="button" data-action="route-settings">${icon("settings")}Settings</button>
+      <button class="menu-item" type="button" data-action="route-help">${icon("help-circle")}Help & how to use Marvel Chat</button>
       <button class="menu-item" type="button" data-action="feedback">${icon("message")}Feedback</button>
       <div class="menu-sep"></div>
       <button class="menu-item" type="button" data-action="legal-terms">${icon("file")}Terms</button>
@@ -239,8 +240,7 @@ function sideMenu() {
 }
 
 function shell(content, noBottom = false) {
-  const offline = state.isOffline ? `<div class="offline-status" role="status" aria-live="polite">You’re offline. Cached app pages may be available; sending, uploading and live updates need a connection.</div>` : "";
-  return `<div class="app-shell">${topbar()}<main class="main-scroll">${offline}${content}</main>${noBottom ? "" : bottomBar()}</div>`;
+  return `<div class="app-shell">${topbar()}<main class="main-scroll">${content}</main>${noBottom ? "" : bottomBar()}</div>`;
 }
 function emptyState(title, text, action = "", label = "") {
   return `<div class="empty-state"><div class="empty-icon">${icon("spark",19)}</div><strong>${esc(title)}</strong><span>${esc(text)}</span>${action ? `<button class="btn btn-secondary" type="button" data-action="${esc(action)}">${esc(label)}</button>` : ""}</div>`;
@@ -404,7 +404,7 @@ function searchResultCard(item) {
     return `<article class="result compact-result">${avatar(p,"sm",true)}<div class="grow"><strong>${esc(item?.title || p.displayName || p.username || "Member")}</strong><small>${esc(item?.subtitle || item?.subTitle || (p.username ? `@${p.username}` : p.bio || "Community member"))}</small></div>${id && id !== state.user.uid ? `<div class="result-actions"><button class="btn btn-secondary" type="button" data-action="view-user" data-id="${esc(id)}">View</button><button class="btn btn-secondary" type="button" data-action="message-user" data-id="${esc(id)}">Message</button><button class="btn btn-secondary" type="button" data-action="${following ? "unfollow-user" : "follow-user"}" data-id="${esc(id)}">${following ? "Following" : "Follow"}</button></div>` : ""}</article>`;
   }
   if (type === "post") {
-    return `<article class="result compact-result"><div class="result-icon">${icon("grid",18)}</div><div class="grow"><strong>${esc(item?.title || "Community post")}</strong><small>${esc(item?.subtitle || "Public community update")}</small><small class="muted">Post · ${esc(when(item?.createdAt || item?.updatedAt))}</small></div><span class="muted">Post</span></article>`;
+    return `<article class="result compact-result"><div class="result-icon">${icon("grid",18)}</div><button class="search-post-summary grow" type="button" data-action="open-search-post" data-id="${esc(item?.id || "")}" data-author="${esc(item?.authorUid || "")}" aria-label="Open post preview"><strong>${esc(item?.title || "Community post")}</strong><small>${esc(item?.subtitle || "Public community update")}</small><small class="muted">Post · ${esc(when(item?.createdAt || item?.updatedAt))}</small></button><span class="muted">Post</span></article>`;
   }
   if (type === "skill_listing") {
     return `<article class="result compact-result"><div class="result-icon">${icon("skills",18)}</div><div class="grow"><strong>${esc(item?.title || p.title || "Skill listing")}</strong><small>${esc(item?.subtitle || item?.subTitle || p.description || "")}</small></div><button class="btn btn-secondary" type="button" data-action="skill-search-view" data-id="${esc(item.id || "")}">View</button></article>`;
@@ -669,7 +669,7 @@ async function loadSkillWorkspace() {
   const profileSnap = await getDoc(doc(db,"skillProfiles",state.user.uid));
   state.skillProfile = profileSnap.exists() ? {uid:state.user.uid,...profileSnap.data()} : null;
   const listingSnap = await getDocs(query(collection(db,"skillListings"), where("providerUid","==",state.user.uid), limit(50)));
-  state.skillListingsMine = listingSnap.docs.map((d) => ({id:d.id,...d.data()}));
+  state.skillListingsMine = listingSnap.docs.map((d) => ({id:d.id,...d.data()})).filter((item) => item.status !== "deleted");
   void Promise.all(state.skillListingsMine.slice(0, 8).map((item) => hydrateSkillListingMedia(item))).then(() => { if (state.route === "skill-profile") paint(); });
   const [reqA, reqB] = await Promise.all([
     getDocs(query(collection(db,"skillRequests"), where("requesterUid","==",state.user.uid), limit(40))).catch(() => ({docs:[]})),
@@ -681,20 +681,30 @@ async function loadSkillWorkspace() {
 }
 
 async function loadMarket() {
-  const [r, categorySnap, storeSnap, savedResult] = await Promise.all([
-    api.discoverMarketProducts({query: state.searchQuery || "", scope:"all"}),
+  const sharedTasks = [
     getDocs(query(collection(db,"productCategories"), where("status","==","active"), limit(50))).catch(() => ({docs:[]})),
     getDocs(query(collection(db,"stores"), where("ownerUid","==",state.user.uid), limit(1))).catch(() => ({docs:[]})),
     api.getMySavedMarketProducts({limit: 40}).catch((error) => {
       console.debug("[Marvel Chat] saved Market list unavailable", error?.code || error?.message);
       return {productIds: [], products: []};
     })
+  ];
+  if (!state.marketStoresLoaded) {
+    sharedTasks.push(getDocs(query(collection(db,"stores"), where("status","==","active"), limit(24))).catch(() => ({docs:[]})));
+  }
+  const [r, categorySnap, storeSnap, savedResult, publicStoresSnap] = await Promise.all([
+    api.discoverMarketProducts({query: state.searchQuery || "", scope:"all"}),
+    ...sharedTasks
   ]);
   state.products = Array.isArray(r?.results) ? r.results : [];
   state.marketCategories = categorySnap.docs.map((d) => ({id:d.id,...d.data()}));
   state.myStore = storeSnap.docs.length ? {id:storeSnap.docs[0].id,...storeSnap.docs[0].data()} : state.myStore;
   state.savedMarketProductIds = Array.isArray(savedResult?.productIds) ? savedResult.productIds.map(String) : [];
   state.savedMarketProducts = Array.isArray(savedResult?.products) ? savedResult.products : [];
+  if (publicStoresSnap) {
+    state.marketStores = publicStoresSnap.docs.map((d) => ({id:d.id,...d.data()})).filter((store) => store.status === "active");
+    state.marketStoresLoaded = true;
+  }
   const catalogue = state.marketShowSaved ? state.savedMarketProducts : state.products;
   void Promise.all(catalogue.slice(0, 8).map((item) => hydrateMarketProductMedia(item))).then(() => { if (state.route === "market") paint(); });
 }
@@ -939,7 +949,19 @@ function renderSkillProfile() {
 
 function renderMarket() {
   const base = state.marketShowSaved ? state.savedMarketProducts : state.products;
-  const filtered = base.filter((item) => categoryMatches(item.result || item, state.marketCategory || "all"));
+  const queryText = String(state.searchQuery || "").trim().toLowerCase();
+  const stores = (state.marketStores || []).filter((store) => {
+    if (store.status !== "active") return false;
+    const name = String(store.name || store.storeName || "").toLowerCase();
+    const category = String(store.category || "").toLowerCase();
+    const location = String(store.location || store.locationText || "").toLowerCase();
+    return !queryText || name.includes(queryText) || category.includes(queryText) || location.includes(queryText);
+  }).slice(0, 12);
+  const filtered = base.filter((item) => {
+    const p = item.result || item;
+    return categoryMatches(p, state.marketCategory || "all") &&
+      (!state.marketShopFilter || String(p.storeId || p.shopId || "") === String(state.marketShopFilter));
+  });
   filtered.sort((a, b) => {
     const ap = a.result || a; const bp = b.result || b;
     if (state.marketSort === "price-low") return Number(ap.priceMinor || 0) - Number(bp.priceMinor || 0);
@@ -954,7 +976,13 @@ function renderMarket() {
     const mediaPending = Array.isArray(p.mediaIds) && p.mediaIds.length && !Array.isArray(p.mediaUrls);
     return `<article class="product-card" ${mediaPending ? `data-media-kind="market" data-media-id="${esc(productId)}"` : ""}><button class="product-card-main" type="button" data-action="market-view" data-id="${esc(productId)}"><div class="product-cover">${image ? `<img src="${esc(image)}" alt="${esc(p.title || "Product photo")}" loading="lazy" decoding="async">` : `<div class="product-cover-icon">${icon("market",24)}</div>`}</div><div class="product-info"><span class="eyebrow">PRODUCT</span><h3>${esc(p.title || item.title || "Product")}</h3><p>${esc(p.description || p.subTitle || "")}</p><strong>${money(p.priceMinor,p.currency || "NGN")}</strong></div></button><button class="market-save-button ${saved ? "is-saved" : ""}" type="button" data-action="toggle-saved-market-product" data-id="${esc(productId)}" aria-pressed="${saved}">${icon("bookmark",16)}${saved ? "Saved" : "Save"}</button></article>`;
   };
-  return `<section class="screen market-screen">${head("DISCOVERY","Marvel Market","Discover products from real storefronts.",state.myStore ? "route-business" : "",state.myStore ? "My Shop" : "")}${contextualSearch("market-form","Search products and shops…","market",state.searchQuery)}<div class="market-powered">Powered by Davonium Technologies</div><section class="section"><div class="section-head compact"><div><span class="eyebrow">CATEGORIES</span><h2>Browse categories</h2></div></div>${categoryChips("market",state.marketCategory || "all")}</section><section class="market-tool-row"><button class="category-chip ${state.marketShowSaved ? "active" : ""}" type="button" data-action="toggle-market-saved-view">${icon("bookmark",15)} Saved products</button><label class="market-sort-label">Sort <select data-action="market-sort" aria-label="Sort products"><option value="newest" ${state.marketSort === "newest" ? "selected" : ""}>Recommended / newest</option><option value="price-low" ${state.marketSort === "price-low" ? "selected" : ""}>Price: low to high</option><option value="price-high" ${state.marketSort === "price-high" ? "selected" : ""}>Price: high to low</option></select></label></section><section class="section"><div class="product-grid">${filtered.length ? filtered.map(card).join("") : emptyState(state.marketShowSaved ? "No saved products yet" : "Nothing to show yet",state.marketShowSaved ? "Save a product to keep it here for later." : "Try another category or search phrase.")}</div></section></section>`;
+  const storeCards = stores.map((store) => {
+    const active = String(state.marketShopFilter || "") === String(store.id);
+    const storeName = store.name || store.storeName || "Store";
+    const initialsText = storeName.trim().split(/\s+/).slice(0, 2).map((x) => x[0] || "").join("").toUpperCase();
+    return `<button class="market-shop-card ${active ? "active" : ""}" type="button" data-action="market-filter-shop" data-id="${esc(store.id)}" aria-pressed="${active}"><span class="market-shop-mark">${esc(initialsText || "S")}</span><span class="market-shop-copy"><strong>${esc(storeName)}</strong><small>${esc(store.category || "Community store")}${store.location || store.locationText ? ` · ${esc(store.location || store.locationText)}` : ""}</small><em>View products ↗</em></span></button>`;
+  }).join("");
+  return `<section class="screen market-screen">${head("DISCOVERY","Marvel Market","Discover products and shops from the community.",state.myStore ? "route-business" : "",state.myStore ? "My Shop" : "")}${contextualSearch("market-form","Search products and shops…","market",state.searchQuery)}<div class="market-powered">Powered by Davonium Technologies</div><section class="section market-shops-section"><div class="section-head compact"><div><span class="eyebrow">STOREFRONTS</span><h2>Explore shops</h2></div>${state.marketShopFilter ? `<button class="text-button" type="button" data-action="market-clear-shop">Clear filter</button>` : ""}</div>${storeCards ? `<div class="market-shop-grid">${storeCards}</div>` : `<p class="muted market-small-note">Active shops will appear here as sellers publish their storefronts.</p>`}</section><section class="section"><div class="section-head compact"><div><span class="eyebrow">CATEGORIES</span><h2>Browse categories</h2></div></div>${categoryChips("market",state.marketCategory || "all")}</section><section class="market-tool-row"><button class="category-chip ${state.marketShowSaved ? "active" : ""}" type="button" data-action="toggle-market-saved-view">${icon("bookmark",15)} Saved products</button><label class="market-sort-label">Sort <select data-action="market-sort" aria-label="Sort products"><option value="newest" ${state.marketSort === "newest" ? "selected" : ""}>Recommended / newest</option><option value="price-low" ${state.marketSort === "price-low" ? "selected" : ""}>Price: low to high</option><option value="price-high" ${state.marketSort === "price-high" ? "selected" : ""}>Price: high to low</option></select></label></section><section class="section"><div class="section-head compact"><div><span class="eyebrow">${state.marketShowSaved ? "YOUR COLLECTION" : state.marketShopFilter ? "SELECTED SHOP" : "CATALOGUE"}</span><h2>${state.marketShopFilter ? esc(stores.find((s) => String(s.id) === String(state.marketShopFilter))?.name || "Shop products") : state.marketShowSaved ? "Saved products" : "Products"}</h2></div></div><div class="product-grid">${filtered.length ? filtered.map(card).join("") : emptyState(state.marketShowSaved ? "No saved products yet" : state.marketShopFilter ? "No active products from this shop yet" : "Nothing to show yet",state.marketShowSaved ? "Save a product to keep it here for later." : "Try another category or search phrase, or explore an active shop above.")}</div></section></section>`;
 }
 
 function renderBusiness() {
@@ -1004,9 +1032,15 @@ function renderProfile() {
 
 function renderSearch() {
   const results = state.searchResults.slice(0,24);
-  return `<section class="screen">${head("DISCOVERY","Search","Find people, skills, products, and shops.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search everything…" autocomplete="off"></label><select name="scope"><option value="all" ${state.searchScope === "all" ? "selected" : ""}>Everything</option><option value="users" ${state.searchScope === "users" ? "selected" : ""}>People</option><option value="skills" ${state.searchScope === "skills" ? "selected" : ""}>Skills</option><option value="market" ${state.searchScope === "market" ? "selected" : ""}>Market</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching","Search by name, username, skill, product, or shop.")}</div></section>`;
+  const scope = state.searchScope === "users" ? "users" : "people_posts";
+  return `<section class="screen">${head("DISCOVERY","Search","Find people and public posts.", "", "", "home")}<form id="search-form" class="search-form"><label class="search-box">${icon("search",18)}<input name="query" value="${esc(state.searchQuery)}" maxlength="80" placeholder="Search people and posts…" autocomplete="off"></label><select name="scope" aria-label="Search scope"><option value="people_posts" ${scope === "people_posts" ? "selected" : ""}>People and posts</option><option value="users" ${scope === "users" ? "selected" : ""}>People only</option></select><button class="btn btn-primary" type="submit">Search</button></form><div class="results">${results.length ? results.map(searchResultCard).join("") : emptyState("Start searching","Search a name, username, or words from a public post.")}</div></section>`;
 }
 function renderNotifications() { return `<section class="screen">${head("UPDATES","Notifications",state.unreadNotifications ? `${state.unreadNotifications} unread` : "You are all caught up.", "", "", "home")}<div>${state.notifications.length ? state.notifications.map((n) => `<article class="notification ${n.read || n.isRead || n.readAt ? "" : "unread"}"><div class="notification-icon">${icon("bell",18)}</div><div class="grow"><strong>${esc(n.title || "Marvel Chat")}</strong><p>${esc(n.body || "")}</p><small>${when(n.createdAt)}</small></div>${!(n.read || n.isRead || n.readAt) ? `<button class="text-button" type="button" data-action="read-notification" data-id="${esc(n.id)}">Mark read</button>` : ""}</article>`).join("") : emptyState("No new notifications","Activity updates will appear here.")}</div></section>`; }
+
+function renderHelp() {
+  return `<section class="screen help-screen">${head("HELP CENTER","How to use Marvel Chat","A quick guide to the main features and getting support.","feedback","Contact support","home")}<div class="help-grid"><article class="help-card"><span class="tile-icon">${icon("home",20)}</span><h2>Home and Moments</h2><p>Browse public posts, follow people to personalize your feed, use Load more for the next page, and publish photo or text updates within your media quota.</p></article><article class="help-card"><span class="tile-icon">${icon("chat",20)}</span><h2>Chats</h2><p>Open a conversation from a person’s profile or search results. Use the chat menu to pin, archive or hide a conversation when those controls are available.</p></article><article class="help-card"><span class="tile-icon">${icon("skills",20)}</span><h2>Marvel Skills</h2><p>Browse services, open a provider profile, and send a request. Providers can manage active services from My Skills.</p></article><article class="help-card"><span class="tile-icon">${icon("shop",20)}</span><h2>Marvel Market</h2><p>Explore active shops, search products, save items for later, and contact sellers through commerce requests. Payments are not collected in the app yet.</p></article><article class="help-card"><span class="tile-icon">${icon("profile",20)}</span><h2>Profile and privacy</h2><p>Manage your name, username, photo, followers, preferences and notification permissions from Profile and Settings.</p></article><article class="help-card"><span class="tile-icon">${icon("bell",20)}</span><h2>Notifications and installation</h2><p>Enable browser notifications from Settings after signing in. Installation is optional and offered only where supported by your browser.</p></article></div><section class="help-contact"><div><span class="eyebrow">NEED MORE HELP?</span><h2>Davonium Technologies Support</h2><p>For account or safety concerns, contact the company team.</p></div><div class="stack-buttons"><a class="btn btn-primary" href="https://www.davoniumtech.com/contact" target="_blank" rel="noopener noreferrer">Contact support</a><a class="btn btn-secondary" href="https://www.davoniumtech.com/" target="_blank" rel="noopener noreferrer">Company website</a></div></section></section>`;
+}
+
 function renderSettings() {
   return `<section class="screen">${head("PREFERENCES","Settings","Choose how Marvel Chat looks and behaves.", "", "", "profile")}<div class="settings-list"><article class="setting-card"><div class="setting-copy"><strong>Appearance</strong><small>Choose the theme used across the application.</small></div><div class="theme-pills">${["light","dark","system"].map((x) => `<button class="${state.theme === x ? "active" : ""}" type="button" data-action="theme-${x}">${icon(x === "light" ? "sun" : x === "dark" ? "moon" : "system",16)}${x[0].toUpperCase()+x.slice(1)}</button>`).join("")}</div></article><article class="setting-card"><div class="setting-copy"><strong>Notifications</strong><small>Receive Marvel Chat updates on this browser when permission is enabled.</small></div>${state.pushEnabled ? `<button class="btn btn-secondary" type="button" data-action="disable-notifications">Disable</button>` : `<button class="btn btn-primary" type="button" data-action="enable-notifications">Enable</button>`}</article><button class="setting-card setting-link" type="button" data-action="legal-terms"><div class="setting-copy"><strong>Terms</strong><small>Review our service terms.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-privacy"><div class="setting-copy"><strong>Privacy</strong><small>Learn how account and activity data are handled.</small></div>${icon("arrow",18)}</button><button class="setting-card setting-link" type="button" data-action="legal-community"><div class="setting-copy"><strong>Community Guidelines</strong><small>Our standards for a useful and trustworthy community.</small></div>${icon("arrow",18)}</button></div></section>`;
 }
@@ -1021,6 +1055,10 @@ function getBrowserDeviceIds() {
 }
 
 let foregroundMessageUnsubscribe = null;
+function readPushPreference(uid = state.user?.uid) {
+  if (!uid || typeof Notification === "undefined" || Notification.permission !== "granted") return false;
+  try { return localStorage.getItem(`marvel-push-enabled.${uid}`) === "1"; } catch { return false; }
+}
 
 async function enableBrowserNotifications() {
   if (!("Notification" in window)) { toast("Notifications are not supported in this browser.","error"); return; }
@@ -1031,6 +1069,8 @@ async function enableBrowserNotifications() {
     if (!token) throw new Error("Browser push is unavailable on this device.");
     const {deviceId, installationId} = getBrowserDeviceIds();
     await api.registerDevice({deviceId, installationId, token, platform:"web", browser:navigator.userAgent.slice(0,120)});
+    await api.updateUserSettings({notificationPreferences:{pushEnabled:true}});
+    try { localStorage.setItem(`marvel-push-enabled.${state.user.uid}`, "1"); } catch {}
     state.pushEnabled = true;
     if (foregroundMessageUnsubscribe) foregroundMessageUnsubscribe();
     foregroundMessageUnsubscribe = onForegroundMessage((payload) => {
@@ -1051,6 +1091,8 @@ async function disableBrowserNotifications() {
   try {
     const {deviceId} = getBrowserDeviceIds();
     await api.unregisterDevice({deviceId});
+    await api.updateUserSettings({notificationPreferences:{pushEnabled:false}});
+    try { localStorage.removeItem(`marvel-push-enabled.${state.user.uid}`); } catch {}
     state.pushEnabled = false;
     if (foregroundMessageUnsubscribe) { foregroundMessageUnsubscribe(); foregroundMessageUnsubscribe = null; }
     toast("Notifications disabled for this browser.","success");
@@ -1153,7 +1195,7 @@ function openLegal(type) {
 const viewMap = {
   home: renderHome, chat: renderChat, skills: renderSkills, market: renderMarket,
   profile: renderProfile, search: renderSearch, "saved-posts": renderSavedPosts, notifications: renderNotifications,
-  settings: renderSettings, "skill-profile": renderSkillProfile,
+  settings: renderSettings, help: renderHelp, "skill-profile": renderSkillProfile,
   business: renderBusiness, "seller-onboarding": renderSellerOnboarding,
   "skill-onboarding": renderSkillOnboarding
 };
@@ -1198,27 +1240,26 @@ function paint() {
     app.innerHTML = authScreen();
     return;
   }
-  // Capture the actual scroll offset before replacing the feed DOM. Keeping a
-  // pixel ratio (not merely the rounded slide number) avoids snapping a user's
-  // finger back to slide one when a signed URL finishes loading mid-swipe.
+  // Preserve a whole slide index through re-renders.
   const carouselOffsets = new Map();
   app.querySelectorAll("[data-post-carousel-track]").forEach((track) => {
     if (!track.dataset.id || !track.clientWidth) return;
-    const ratio = track.scrollLeft / track.clientWidth;
-    carouselOffsets.set(String(track.dataset.id), ratio);
+    const index = Math.max(0, Math.round(track.scrollLeft / track.clientWidth));
+    carouselOffsets.set(String(track.dataset.id), index);
     const post = [...state.posts, ...state.savedPosts].find((item) => String(item.id) === String(track.dataset.id));
-    if (post) post.mediaIndex = Math.max(0, Math.min((post.mediaIds || []).length - 1, Math.round(ratio)));
+    if (post) post.mediaIndex = Math.max(0, Math.min((post.mediaIds || []).length - 1, index));
   });
   app.innerHTML = shell((viewMap[state.route] || renderHome)(), state.route === "chat" && Boolean(state.activeThreadId));
   bindHomePagination();
   bindCatalogueMedia();
   app.querySelectorAll("[data-post-carousel-track]").forEach((track) => {
-    const savedRatio = carouselOffsets.get(String(track.dataset.id));
+    const savedIndex = carouselOffsets.get(String(track.dataset.id));
     const fallbackIndex = Math.max(0, Number(track.dataset.startIndex || 0));
-    const ratio = Number.isFinite(savedRatio) ? savedRatio : fallbackIndex;
+    const index = Number.isFinite(savedIndex) ? savedIndex : fallbackIndex;
     requestAnimationFrame(() => {
       if (!track.isConnected || !track.clientWidth) return;
-      track.scrollLeft = Math.max(0, ratio * track.clientWidth);
+      track.scrollLeft = Math.max(0, index * track.clientWidth);
+      track.dataset.currentIndex = String(index);
     });
   });
   syncDiscoveryBannerTimer();
@@ -1446,6 +1487,14 @@ document.addEventListener("click", async (e) => {
   if (!actionEl) return;
   const a = actionEl.dataset.action;
   try {
+    if (a === "open-search-post") {
+      const post = [...state.homeSearchResults, ...state.searchResults].find((item) => String(item.id) === String(actionEl.dataset.id));
+      if (!post) { toast("That search result is no longer available.", "info"); return; }
+      const authorUid = String(post.authorUid || actionEl.dataset.author || "");
+      const postText = String(post.subtitle || "Public community update");
+      modal("Community post", `<article class="search-post-preview"><span class="eyebrow">PUBLIC POST</span><h3>${esc(post.title || "Community post")}</h3><p>${esc(postText)}</p><small>${esc(when(post.createdAt || post.updatedAt))}</small></article>`, `<button class="btn btn-secondary" type="button" data-action="close-modal">Close</button>${authorUid ? `<button class="btn btn-primary" type="button" data-action="view-user" data-id="${esc(authorUid)}">View author</button>` : ""}`, {wide:true});
+      return;
+    }
     if (a === "close-modal") { clearTimeout(momentAutoCloseTimer); closeModal(); return; }
     if (a === "dismiss-discovery-banner") { stopDiscoveryBannerTimer(); discoveryBannerVisibleForUser = false; paint(); return; }
     if (a === "auth-welcome") { authMode="welcome"; paint(); return; }
@@ -1734,7 +1783,31 @@ document.addEventListener("click", async (e) => {
     if (a === "create-skill-listing") { if(!state.skillProfile){go("skill-onboarding");return;} openSkillListingEditor();return; }
     if (a === "edit-skill-listing") { const s=state.skillListingsMine.find((x)=>x.id===actionEl.dataset.id); if(s)openSkillListingEditor(s);return; }
     if (a === "pause-skill-listing" || a === "activate-skill-listing") { await api.updateSkillListing({listingId:actionEl.dataset.id,status:a === "activate-skill-listing" ? "active" : "paused"});toast(a === "activate-skill-listing" ? "Service offered again." : "Service paused.","success");await loadSkillWorkspace();paint();return; }
-    if (a === "delete-skill-listing") { await api.deleteSkillListing({listingId:actionEl.dataset.id});toast("Service archived.","success");await loadSkillWorkspace();paint();return; }
+    if (a === "delete-skill-listing") {
+      const id = String(actionEl.dataset.id || "");
+      if (!id) return;
+      modal("Delete service?", "This removes the service from public Skills listings. A hidden record may remain only when needed for existing request history.", `<button class="btn btn-secondary" type="button" data-action="close-modal">Cancel</button><button class="btn btn-danger" type="button" data-action="confirm-delete-skill-listing" data-id="${esc(id)}">Delete service</button>`);
+      return;
+    }
+    if (a === "confirm-delete-skill-listing") {
+      const listingId = String(actionEl.dataset.id || "");
+      if (!listingId) return;
+      const deleted = await api.deleteSkillListing({listingId});
+      let cleanup = {pendingIds: [], retainedIds: []};
+      if (Array.isArray(deleted?.mediaIds) && deleted.mediaIds.length) {
+        try { cleanup = await api.cleanupDeletedMedia({feature:"skill_listing",parentId:listingId,parentCollection:"skillListings"}); }
+        catch (error) { console.warn("[Marvel Chat] service media cleanup remains pending", error?.code || error?.message); cleanup = {pendingIds: deleted.mediaIds}; }
+      }
+      if (!(cleanup.pendingIds || []).length && !(cleanup.retainedIds || []).length) {
+        try { await api.purgeDeletedSkillListing({listingId}); }
+        catch (error) { console.warn("[Marvel Chat] service tombstone retained", error?.code || error?.message); }
+      }
+      closeModal();
+      toast((cleanup.pendingIds || []).length ? "Service removed from listings. Media cleanup is pending." : "Service removed from public listings.", (cleanup.pendingIds || []).length ? "info" : "success");
+      await loadSkillWorkspace();
+      paint();
+      return;
+    }
     if (a === "market-view") { const m=[...state.products,...state.savedMarketProducts].find((x)=>String(x.id || x.result?.id)===String(actionEl.dataset.id)); if(m){await hydrateMarketProductMedia(m);openMarketProduct(m);}return; }
     if (a === "submit-purchase") { const d=Object.fromEntries(new FormData(document.getElementById("purchase-form"))); const quantity=Math.max(1,Math.min(1000,Number(d.quantity||1))); await api.createMarketCommerceRequest({items:[{productId:d.productId,quantity}],customerNote:String(d.customerNote || "").trim()});closeModal();toast("Commerce request sent.","success");return; }
     if (a === "route-seller-onboarding") { state.sellerOnboardingStep=0;go("seller-onboarding");return; }
@@ -1834,7 +1907,10 @@ document.addEventListener("click", async (e) => {
     if (a === "disable-notifications") { await disableBrowserNotifications(); return; }
     if (a.startsWith("theme-")) { const t=a.slice(6);setTheme(t);paint();try{await api.updateUserSettings({themeId:t});}catch{}return; }
     if (a === "market-category") { state.marketCategory=actionEl.dataset.category || "all";paint();return; }
+    if (a === "market-filter-shop") { state.marketShowSaved = false; state.marketShopFilter = String(actionEl.dataset.id || ""); paint(); return; }
+    if (a === "market-clear-shop") { state.marketShopFilter = ""; paint(); return; }
     if (a === "toggle-market-saved-view") {
+      state.marketShopFilter = "";
       state.marketShowSaved = !state.marketShowSaved;
       paint();
       const items = state.marketShowSaved ? state.savedMarketProducts : state.products;
@@ -2068,7 +2144,7 @@ document.addEventListener("submit", async (e) => {
     if(f.id === "chat-person-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.chatSearchQuery=String(d.query || "").trim();if(state.chatSearchQuery.length<2){state.chatSearchResults=[];paint();return;}const r=await api.search({query:state.chatSearchQuery,scope:"users"});state.chatSearchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
     if(f.id === "skills-search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.skillsSearchQuery=String(d.query || "").trim();paint();return;}
     if(f.id === "search-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.searchScope=String(d.scope || "all");if(state.searchQuery.length<2){state.searchResults=[];paint();return;}const r=await api.search({query:state.searchQuery,scope:state.searchScope});state.searchResults=Array.isArray(r?.results)?r.results:[];paint();return;}
-    if(f.id === "market-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();await loadMarket();paint();return;}
+    if(f.id === "market-form"){e.preventDefault();const d=Object.fromEntries(new FormData(f));state.searchQuery=String(d.query || "").trim();state.marketShopFilter="";state.marketShowSaved=false;await loadMarket();paint();return;}
   } catch(err) { e.preventDefault(); console.error(err?.code,err?.message); toast(friendlyError(err),"error"); }
 });
 
@@ -2090,8 +2166,8 @@ window.addEventListener("appinstalled", () => {
   state.installAvailable = false;
   toast("Marvel Chat is installed on this device.", "success");
 });
-window.addEventListener("offline", () => { state.isOffline = true; if (state.user) paint(); });
-window.addEventListener("online", () => { state.isOffline = false; if (state.user) paint(); });
+window.addEventListener("offline", () => { if (state.isOffline) return; state.isOffline = true; if (state.user) toast("You’re offline. Live updates and uploads need a connection.","error"); });
+window.addEventListener("online", () => { if (!state.isOffline) return; state.isOffline = false; if (state.user) toast("You’re back online.","success"); });
 if("serviceWorker" in navigator) navigator.serviceWorker.register("./sw.js").catch(()=>{});
 app.innerHTML=`<main class="splash"><section class="splash-card"><div class="brand-mark brand-mark-xl"><img src="./assets/brand/icon-512.png" alt="Marvel Chat"></div><h1>Marvel Chat</h1><p>by Davonium Technologies</p><div class="loader"><span></span></div></section></main>`;
 
@@ -2099,6 +2175,7 @@ onAuthStateChanged(auth, async (user) => {
   clearSubscriptions();
   const previousUid = state.user?.uid || "";
   state.user = user;
+  state.pushEnabled = readPushPreference(user?.uid);
   if (previousUid !== (user?.uid || "")) { stopDiscoveryBannerTimer(); discoveryBannerVisibleForUser = null; }
   state.activeThreadId = null;
   state.messages = [];

@@ -6,7 +6,7 @@ const names = [
   "createPost", "updatePost", "deletePost", "getHomeFeed", "getHomeMoments", "createMoment", "updateMoment", "deleteMoment",
   "reactToPost", "commentOnPost", "getPostComments", "savePost", "getMySavedPosts",
   "createChatThread", "sendMessage", "markThreadRead", "deleteMessage", "editMessage", "updateChatThreadPreference",
-  "upsertSkillProfile", "createSkillListing", "updateSkillListing", "deleteSkillListing",
+  "upsertSkillProfile", "createSkillListing", "updateSkillListing", "deleteSkillListing", "purgeDeletedSkillListing",
   "createSkillRequest", "createSkillOffer", "acceptSkillOffer", "declineSkillOffer",
   "completeSkillRequest", "cancelSkillRequest", "createSkillReview",
   "createStore", "updateStoreProfile", "setStoreStatus", "createProduct", "updateProduct",
